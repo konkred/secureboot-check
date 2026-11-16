@@ -123,8 +123,8 @@ function Get-CN([string]$dn) { if ($dn -match 'CN=([^,]+)') { $Matches[1].Trim()
 
 function Parse-Esl([byte[]]$b) {
     # EFI_SIGNATURE_LIST(s) -> Zertifikate + Anzahl Hashes
-    $certs = @(); $hashes = 0; $o = 0
-    if (-not $b) { return [pscustomobject]@{ Certs=@(); Hashes=0 } }
+    $certs = @(); $hashes = 0; $other = 0; $o = 0
+    if (-not $b) { return [pscustomobject]@{ Certs=@(); Hashes=0; Other=0; Valid=$true } }
     while ($o + 28 -le $b.Length) {
         $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
         $listSize = [BitConverter]::ToUInt32($b, $o + 16)
@@ -135,12 +135,28 @@ function Parse-Esl([byte[]]$b) {
         while ($p + $sigSize -le $o + $listSize) {
             if ($type -eq $X509Guid) {
                 try { $certs += New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$b[($p + 16)..($p + $sigSize - 1)]) } catch {}
-            } elseif ($type -eq $Sha256Guid) { $hashes++ }
+            } elseif ($type -eq $Sha256Guid) { $hashes++ } else { $other++ }
             $p += $sigSize
         }
         $o += $listSize
     }
-    [pscustomobject]@{ Certs = $certs; Hashes = $hashes }
+    # Valid = die Daten bestehen vollstaendig aus sauberen Signaturlisten (kein Rest, kein Muell)
+    [pscustomobject]@{ Certs = $certs; Hashes = $hashes; Other = $other; Valid = ($o -eq $b.Length) }
+}
+
+function Get-CleanDbx([byte[]]$b) {
+    # Behaelt nur saubere SHA256-Hashlisten - alles andere (Zertifikate, unbekannte Typen, Muell) faellt weg
+    $l = New-Object System.Collections.Generic.List[byte]; $o = 0
+    if (-not $b) { return ,([byte[]]@()) }
+    while ($o + 28 -le $b.Length) {
+        $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
+        $listSize = [BitConverter]::ToUInt32($b, $o + 16)
+        $sigSize  = [BitConverter]::ToUInt32($b, $o + 24)
+        if ($listSize -lt 28 -or $sigSize -lt 16 -or ($o + $listSize) -gt $b.Length) { break }
+        if ($type -eq $Sha256Guid) { $l.AddRange([byte[]]$b[$o..($o + $listSize - 1)]) }
+        $o += $listSize
+    }
+    ,$l.ToArray()
 }
 
 function Get-VarEsl([string]$Name) {
@@ -164,6 +180,20 @@ function Get-Signers([byte[]]$sig) {
     @($cms.SignerInfos | ForEach-Object { if ($_.Certificate) { Get-CN $_.Certificate.Subject } })
 }
 
+function Unwrap-Content([byte[]]$c) {
+    # Manche (aeltere) Microsoft-Dateien haben vor der Signaturliste noch
+    # VariablenName(UTF-16) + VendorGuid + Attribute + EFI_TIME - das wird hier abgeschnitten.
+    $known = @([Guid]'d719b2cb-3d3a-4596-a3bc-dad00e67656f', [Guid]'8be4df61-93ca-11d2-aa0d-00e098032b8c')
+    for ($n = 2; $n -le 40 -and $n + 36 -le $c.Length; $n += 2) {
+        $g = New-Object Guid (,[byte[]]$c[$n..($n + 15)])
+        if ($known -contains $g) {
+            $s = $n + 16 + 4 + 16
+            if ($s -lt $c.Length) { return [pscustomobject]@{ Content = [byte[]]$c[$s..($c.Length - 1)]; Wrapped = $true } }
+        }
+    }
+    [pscustomobject]@{ Content = $c; Wrapped = $false }
+}
+
 function Read-AuthPayload([string]$Path) {
     # EFI_VARIABLE_AUTHENTICATION_2 = EFI_TIME(16) + WIN_CERTIFICATE_UEFI_GUID + Inhalt
     $b = [IO.File]::ReadAllBytes($Path)
@@ -178,7 +208,8 @@ function Read-AuthPayload([string]$Path) {
     if ($contentStart -ge $b.Length) { return $null }
     try { $dt = New-Object DateTime ($year, $b[2], $b[3], $b[4], $b[5], $b[6]) } catch { return $null }
     $sig     = [byte[]]$b[40..($contentStart - 1)]
-    $content = [byte[]]$b[$contentStart..($b.Length - 1)]
+    $uw      = Unwrap-Content ([byte[]]$b[$contentStart..($b.Length - 1)])
+    $content = $uw.Content
     $esl     = Parse-Esl $content
     [pscustomobject]@{
         File    = $Path
@@ -188,6 +219,9 @@ function Read-AuthPayload([string]$Path) {
         Content = $content
         Certs   = $esl.Certs
         Hashes  = $esl.Hashes
+        Other   = $esl.Other
+        Valid   = $esl.Valid
+        Wrapped = $uw.Wrapped
         Signers = Get-Signers $sig
     }
 }
@@ -261,7 +295,12 @@ foreach ($f in Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction 
     $certKey = (@($p.Certs | ForEach-Object { $_.Thumbprint }) | Sort-Object) -join ','
 
     $skip = $null
-    if ($target -eq '?') { $skip = 'Inhalt nicht erkannt' }
+    if ($p.Name -match 'DBXUpdate2024') {
+        $skip = 'SPERRT die alte Windows-CA 2011 (Dateiname) - wird von diesem Skript NIE eingespielt'
+    }
+    elseif (-not $p.Valid) { $skip = 'Format nicht sauber erkannt - zu riskant' }
+    elseif ($p.Other -gt 0) { $skip = 'enthaelt unbekannte Eintragstypen - zu riskant' }
+    elseif ($target -eq '?') { $skip = 'Inhalt nicht erkannt' }
     elseif ($target -eq 'dbx' -and ($p.Certs | Where-Object { $_.Subject -match 'Production PCA 2011' })) {
         $skip = 'SPERRT die alte Windows-CA 2011 - wird von diesem Skript NIE eingespielt (aktueller Boot-Manager und alle aelteren Boot-Medien wuerden nicht mehr starten)'
     }

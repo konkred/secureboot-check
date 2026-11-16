@@ -94,8 +94,8 @@ $WriteTime   = '2010-03-06T19:17:21Z'
 function Get-CN([string]$dn) { if ($dn -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $dn } }
 
 function Parse-Esl([byte[]]$b) {
-    $certs = @(); $hashes = 0; $o = 0
-    if (-not $b) { return [pscustomobject]@{ Certs=@(); Hashes=0 } }
+    $certs = @(); $hashes = 0; $other = 0; $o = 0
+    if (-not $b) { return [pscustomobject]@{ Certs=@(); Hashes=0; Other=0; Valid=$true } }
     while ($o + 28 -le $b.Length) {
         $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
         $listSize = [BitConverter]::ToUInt32($b, $o + 16)
@@ -106,12 +106,42 @@ function Parse-Esl([byte[]]$b) {
         while ($p + $sigSize -le $o + $listSize) {
             if ($type -eq $X509Guid) {
                 try { $certs += New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$b[($p + 16)..($p + $sigSize - 1)]) } catch {}
-            } elseif ($type -eq $Sha256Guid) { $hashes++ }
+            } elseif ($type -eq $Sha256Guid) { $hashes++ } else { $other++ }
             $p += $sigSize
         }
         $o += $listSize
     }
-    [pscustomobject]@{ Certs = $certs; Hashes = $hashes }
+    # Valid = die Daten bestehen vollstaendig aus sauberen Signaturlisten (kein Rest, kein Muell)
+    [pscustomobject]@{ Certs = $certs; Hashes = $hashes; Other = $other; Valid = ($o -eq $b.Length) }
+}
+
+function Get-CleanDbx([byte[]]$b) {
+    # Behaelt nur saubere SHA256-Hashlisten - alles andere (Zertifikate, unbekannte Typen, Muell) faellt weg
+    $l = New-Object System.Collections.Generic.List[byte]; $o = 0
+    if (-not $b) { return ,([byte[]]@()) }
+    while ($o + 28 -le $b.Length) {
+        $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
+        $listSize = [BitConverter]::ToUInt32($b, $o + 16)
+        $sigSize  = [BitConverter]::ToUInt32($b, $o + 24)
+        if ($listSize -lt 28 -or $sigSize -lt 16 -or ($o + $listSize) -gt $b.Length) { break }
+        if ($type -eq $Sha256Guid) { $l.AddRange([byte[]]$b[$o..($o + $listSize - 1)]) }
+        $o += $listSize
+    }
+    ,$l.ToArray()
+}
+
+function Unwrap-Content([byte[]]$c) {
+    # Manche (aeltere) Microsoft-Dateien haben vor der Signaturliste noch
+    # VariablenName(UTF-16) + VendorGuid + Attribute + EFI_TIME - das wird hier abgeschnitten.
+    $known = @([Guid]'d719b2cb-3d3a-4596-a3bc-dad00e67656f', [Guid]'8be4df61-93ca-11d2-aa0d-00e098032b8c')
+    for ($n = 2; $n -le 40 -and $n + 36 -le $c.Length; $n += 2) {
+        $g = New-Object Guid (,[byte[]]$c[$n..($n + 15)])
+        if ($known -contains $g) {
+            $s = $n + 16 + 4 + 16
+            if ($s -lt $c.Length) { return [pscustomobject]@{ Content = [byte[]]$c[$s..($c.Length - 1)]; Wrapped = $true } }
+        }
+    }
+    [pscustomobject]@{ Content = $c; Wrapped = $false }
 }
 
 function Read-AuthPayload([string]$Path) {
@@ -123,9 +153,9 @@ function Read-AuthPayload([string]$Path) {
     if ((New-Object Guid (,[byte[]]$b[24..39])) -ne $Pkcs7Guid) { return $null }
     $cs = 16 + $dwLength
     if ($cs -ge $b.Length) { return $null }
-    $content = [byte[]]$b[$cs..($b.Length - 1)]
+    $content = (Unwrap-Content ([byte[]]$b[$cs..($b.Length - 1)])).Content
     $esl = Parse-Esl $content
-    [pscustomobject]@{ Name = Split-Path -Leaf $Path; Content = $content; Certs = $esl.Certs; Hashes = $esl.Hashes }
+    [pscustomobject]@{ Name = Split-Path -Leaf $Path; Content = $content; Certs = $esl.Certs; Hashes = $esl.Hashes; Other = $esl.Other; Valid = $esl.Valid }
 }
 
 function New-CertEsl([byte[]]$der) {
@@ -239,7 +269,7 @@ if ($setupMode -ne 1) {
     $dbAdds = @()
     $have = @{}; foreach ($c in $dbE.Certs) { $have[$c.Thumbprint] = $true }
     $payloads = @(Get-ChildItem $PayloadDir -Filter *.bin -File -ErrorAction SilentlyContinue | ForEach-Object { Read-AuthPayload $_.FullName } | Where-Object { $_ })
-    foreach ($p in $payloads | Where-Object { $_.Name -notmatch 'dbx|kek' -and $_.Certs.Count -gt 0 }) {
+    foreach ($p in $payloads | Where-Object { $_.Name -notmatch 'dbx|kek' -and $_.Valid -and $_.Other -eq 0 -and $_.Certs.Count -gt 0 }) {
         $missing = @($p.Certs | Where-Object { -not $have.ContainsKey($_.Thumbprint) })
         if ($missing.Count -gt 0) {
             Info ("db + {0}  [{1}]" -f (($missing | ForEach-Object { Get-CN $_.Subject }) -join ', '), $p.Name)
@@ -253,11 +283,17 @@ if ($setupMode -ne 1) {
     # --- dbx
     $dbxAdds = @()
     foreach ($p in $payloads | Where-Object { $_.Name -match 'dbx' }) {
+        if ($p.Name -match 'DBXUpdate2024') { Info ("dbx: {0} uebersprungen (PCA-2011-Sperre, NIE)" -f $p.Name); continue }
+        if (-not $p.Valid -or $p.Other -gt 0) { Info ("dbx: {0} uebersprungen (Format nicht sauber erkannt)" -f $p.Name); continue }
+        if ($p.Hashes -eq 0) { continue }
         if ($p.Certs.Count -gt 0) { Info ("dbx: {0} uebersprungen (enthaelt Zertifikate, z.B. PCA-2011-Sperre)" -f $p.Name); continue }
         Info ("dbx + {0} Hashes  [{1}]" -f $p.Hashes, $p.Name)
         $dbxAdds += ,$p.Content
     }
-    $newDbx = Join-Bytes (@(,$dbx) + $dbxAdds)
+    $newDbx = Get-CleanDbx (Join-Bytes (@(,$dbx) + $dbxAdds))
+    foreach ($chk in @(@('KEK',$newKek), @('db',$newDb), @('dbx',$newDbx))) {
+        if (-not (Parse-Esl $chk[1]).Valid) { Bad ("Neuer {0}-Inhalt ist fehlerhaft - Abbruch, nichts gespeichert." -f $chk[0]); Finish }
+    }
 
     # --- Zusammenfassung
     $nk = Parse-Esl $newKek; $nd = Parse-Esl $newDb; $nx = Parse-Esl $newDbx
@@ -319,6 +355,20 @@ if ($dev.Count -ge 2 -and ($dev[0] -ne $env:COMPUTERNAME -or $dev[1] -ne $model)
     Bad ("Rebuild-Daten gehoeren zu '{0}' ({1}), nicht zu diesem Geraet - Abbruch." -f $dev[0], $dev[1]); Finish
 }
 Info ("Daten vom {0}" -f $dev[3])
+
+# Schutz vor fehlerhaften Daten aus aelteren Skriptversionen
+foreach ($f in 'PK.esl','KEK.esl','db.esl') {
+    if (-not (Parse-Esl ([IO.File]::ReadAllBytes((Join-Path $StateDir $f)))).Valid) {
+        Bad "$f ist fehlerhaft - Abbruch. Rebuild-Ordner loeschen und Phase 1 neu durchlaufen."; Finish
+    }
+}
+$dbxPath = Join-Path $StateDir 'dbx.esl'
+$dbxRaw = [IO.File]::ReadAllBytes($dbxPath)
+$dbxOk  = Get-CleanDbx $dbxRaw
+if ($dbxOk.Length -ne $dbxRaw.Length) {
+    Warn ("dbx.esl enthielt fehlerhafte/unerwuenschte Teile ({0} -> {1} Bytes) - bereinigt, nur Hash-Sperren bleiben." -f $dbxRaw.Length, $dbxOk.Length)
+    [IO.File]::WriteAllBytes($dbxPath, $dbxOk)
+}
 
 $steps = @(
     @{ Name = 'db';  File = 'db.esl';  Critical = $true  },

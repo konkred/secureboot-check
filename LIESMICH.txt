@@ -83,6 +83,12 @@ Lenovo ThinkCentre M93 (10A4, BIOS FBKTE0AUS)
                       Kurzanleitung + 6_ -> alles 2023. dbx-Anhaengen lehnt die Firmware
                       ab (0xC0000022), ueber 6_ klappt es. Der Original-PK wird hier
                       angenommen, User Mode erst nach dem Neustart. dbDefault nicht lesbar.
+Lenovo ThinkCentre M93p (10AA, gleiches BIOS)
+                      Mit Skript-Version 1.1 schiefgegangen: Windows-Stand 19044.7725 hat
+                      DBXUpdate2024.bin in einem aelteren Format, das 1.1 nicht erkannte -
+                      der Inhalt (PCA-2011-Sperre) landete unlesbar in der dbx -> beim Start
+                      "invalid signature". Ab Version 1.2 behoben (Dateiname-Sperre,
+                      Formatpruefung, dbx wird vor dem Schreiben bereinigt).
 10ZiG Thin Client     Kein Secure Boot -> nicht betroffen.
 
 

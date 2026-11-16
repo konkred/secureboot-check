@@ -85,6 +85,7 @@ Diese Ordner enthalten gerätebezogene Daten und sind per `.gitignore` vom Repos
 | Chromebox (Google Teemo, MrChromebox-UEFI) | Nur `2_Update_anstossen.cmd` → alles 2023. Firmware bringt die 2023-Zertifikate schon mit, Schlüssel-Reset dort ungefährlich. Firmware-Setup: Esc beim Start. |
 | HP Compaq Pro 6300 | db + Boot-Manager 2023 ok. KEK 2023 und dbx **nicht möglich**: Firmware lehnt dbx ab (`0xC0000022`), „Clear Secure Boot Keys“ lädt die Werksschlüssel statt Setup Mode → 6_ **nicht** benutzen. |
 | Lenovo ThinkCentre M93 (10A4, BIOS FBKTE0AUS) | Kurzanleitung + 6_ → alles 2023. dbx-Anhängen lehnt die Firmware ab (`0xC0000022`), über 6_ klappt es. Der Original-PK wird angenommen, User Mode erst nach dem Neustart. |
+| Lenovo ThinkCentre M93p (10AA, gleiches BIOS) | Mit Version 1.1 schiefgegangen: Windows-Stand 19044.7725 hat `DBXUpdate2024.bin` in einem älteren Format, das 1.1 nicht erkannte. Der Inhalt (PCA-2011-Sperre) landete unlesbar in der dbx → beim Start „invalid signature“. Ab Version 1.2 behoben (Dateinamen-Sperre, Formatprüfung, dbx wird vor dem Schreiben bereinigt). |
 | 10ZiG Thin Client | Kein Secure Boot → nicht betroffen. |
 
 ## Ziel – was „fertig“ heißt
