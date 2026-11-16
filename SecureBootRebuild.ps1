@@ -375,6 +375,10 @@ $r = Write-Var 'PK' 'PK.esl'
 $setupMode = $null; try { $setupMode = (Get-SecureBootUEFI -Name SetupMode).Bytes[0] } catch {}
 if ($r -and $setupMode -eq 0) {
     Ok "PK geschrieben - Firmware ist wieder im USER MODE"
+} elseif ($r) {
+    Ok "PK geschrieben und zurueckgelesen."
+    Info "Die Firmware meldet noch 'Setup Mode' - manche (z.B. Lenovo ThinkCentre M93) wechseln erst"
+    Info "nach dem Neustart in den User Mode. Bis dahin keine anderen Skripte starten."
 } else {
     Warn "Die Firmware hat den Original-PK abgelehnt."
     Info "Viele Firmwares verlangen, dass ein PK mit seinem eigenen privaten Schluessel signiert ist -"

@@ -59,7 +59,7 @@ DIE DATEIEN IM EINZELNEN
                           alles zurueck (Original-PK zuletzt). Danach neu starten, dann
                           5_Manuell_mit_dbx.cmd, 2_Update_anstossen.cmd (-> 1808),
                           neu starten, 1_Pruefen.cmd.
-                          Die PK-Fehlermeldung im 2. Lauf ist bei HP normal - die Firmware
+                          Eine PK-Fehlermeldung im 2. Lauf ist bei HP normal - die Firmware
                           stellt ihren PK beim Neustart selbst wieder her.
 
 Ablage (lokal in C:\ProgramData\SecureBootCheck\ und als Kopie hier auf dem Stick):
@@ -79,6 +79,10 @@ Chromebox (Google Teemo, MrChromebox-UEFI)
 HP Compaq Pro 6300    db + Boot-Manager 2023 ok. KEK 2023 und dbx NICHT moeglich:
                       Firmware lehnt dbx ab (0xC0000022), "Clear Secure Boot Keys" laedt
                       die Werksschluessel statt Setup Mode -> 6_ NICHT benutzen.
+Lenovo ThinkCentre M93 (10A4, BIOS FBKTE0AUS)
+                      Kurzanleitung + 6_ -> alles 2023. dbx-Anhaengen lehnt die Firmware
+                      ab (0xC0000022), ueber 6_ klappt es. Der Original-PK wird hier
+                      angenommen, User Mode erst nach dem Neustart. dbDefault nicht lesbar.
 10ZiG Thin Client     Kein Secure Boot -> nicht betroffen.
 
 

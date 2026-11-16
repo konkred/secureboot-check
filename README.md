@@ -61,7 +61,7 @@ Windows UEFI CA 2023“*.
 3. Windows starten, zweiter Lauf schreibt alles zurück (Original-PK zuletzt).
 4. Neu starten, dann `5_Manuell_mit_dbx.cmd`, `2_Update_anstossen.cmd` (→ Ereignis 1808), neu starten, `1_Pruefen.cmd`.
 
-Die PK-Fehlermeldung im zweiten Lauf ist bei HP normal – die Firmware stellt ihren PK beim
+Eine PK-Fehlermeldung im zweiten Lauf ist bei HP normal – die Firmware stellt ihren PK beim
 Neustart selbst wieder her.
 
 ### Ablage
@@ -84,6 +84,7 @@ Diese Ordner enthalten gerätebezogene Daten und sind per `.gitignore` vom Repos
 | HP EliteBook 840 G3 | Kurzanleitung + 6_ → alles 2023. |
 | Chromebox (Google Teemo, MrChromebox-UEFI) | Nur `2_Update_anstossen.cmd` → alles 2023. Firmware bringt die 2023-Zertifikate schon mit, Schlüssel-Reset dort ungefährlich. Firmware-Setup: Esc beim Start. |
 | HP Compaq Pro 6300 | db + Boot-Manager 2023 ok. KEK 2023 und dbx **nicht möglich**: Firmware lehnt dbx ab (`0xC0000022`), „Clear Secure Boot Keys“ lädt die Werksschlüssel statt Setup Mode → 6_ **nicht** benutzen. |
+| Lenovo ThinkCentre M93 (10A4, BIOS FBKTE0AUS) | Kurzanleitung + 6_ → alles 2023. dbx-Anhängen lehnt die Firmware ab (`0xC0000022`), über 6_ klappt es. Der Original-PK wird angenommen, User Mode erst nach dem Neustart. |
 | 10ZiG Thin Client | Kein Secure Boot → nicht betroffen. |
 
 ## Ziel – was „fertig“ heißt
