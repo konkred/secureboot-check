@@ -66,13 +66,13 @@ Neustart selbst wieder her.
 
 ### Ablage
 
-Lokal in `C:\ProgramData\SecureBootCheck\` und als Kopie neben den Skripten:
+Lokal in `C:\ProgramData\SecureBootCheck\` und als Kopie neben den Skripten. `<PC>` ist `Hostname_Seriennummer` (ohne auslesbare Seriennummer nur der Hostname), damit gleich benannte PCs nicht im selben Ordner landen:
 
 | Ordner | Inhalt |
 |---|---|
-| `Logs\<PC-Name>\` | Protokolle aller Läufe |
-| `Backups\<PC-Name>\` | Sicherungen von PK/KEK/db/dbx vor jedem manuellen Schreiben |
-| `Rebuild\<PC-Name>\` | Daten für `6_Schluessel_neu_aufbauen` (zwischen den zwei Läufen) |
+| `Logs\<PC>\` | Protokolle aller Läufe |
+| `Backups\<PC>\` | Sicherungen von PK/KEK/db/dbx vor jedem manuellen Schreiben |
+| `Rebuild\<PC>\` | Daten für `6_Schluessel_neu_aufbauen` (zwischen den zwei Läufen) |
 
 Diese Ordner enthalten gerätebezogene Daten und sind per `.gitignore` vom Repository ausgeschlossen.
 
@@ -85,7 +85,7 @@ Diese Ordner enthalten gerätebezogene Daten und sind per `.gitignore` vom Repos
 | Chromebox (Google Teemo, MrChromebox-UEFI) | Nur `2_Update_anstossen.cmd` → alles 2023. Firmware bringt die 2023-Zertifikate schon mit, Schlüssel-Reset dort ungefährlich. Firmware-Setup: Esc beim Start. |
 | HP Compaq Pro 6300 | db + Boot-Manager 2023 ok. KEK 2023 und dbx **nicht möglich**: Firmware lehnt dbx ab (`0xC0000022`), „Clear Secure Boot Keys“ lädt die Werksschlüssel statt Setup Mode → 6_ **nicht** benutzen. |
 | Lenovo ThinkCentre M93 (10A4, BIOS FBKTE0AUS) | Kurzanleitung + 6_ → alles 2023. dbx-Anhängen lehnt die Firmware ab (`0xC0000022`), über 6_ klappt es. Der Original-PK wird angenommen, User Mode erst nach dem Neustart. |
-| Lenovo ThinkCentre M93p (10AA, gleiches BIOS) | Mit Version 1.1 schiefgegangen: Windows-Stand 19044.7725 hat `DBXUpdate2024.bin` in einem älteren Format, das 1.1 nicht erkannte. Der Inhalt (PCA-2011-Sperre) landete unlesbar in der dbx → beim Start „invalid signature“. Ab Version 1.2 behoben (Dateinamen-Sperre, Formatprüfung, dbx wird vor dem Schreiben bereinigt). |
+| Lenovo ThinkCentre M93p (10AA, gleiches BIOS) | Mit Version 1.1 schiefgegangen: Windows-Stand 19044.7725 hat `DBXUpdate2024.bin` in einem älteren Format, das 1.1 nicht erkannte. Der Inhalt (PCA-2011-Sperre) landete unlesbar in der dbx → beim Start „invalid signature“. Ab Version 1.2 behoben (Dateinamen-Sperre, Formatprüfung, dbx wird vor dem Schreiben bereinigt). Gerettet mit 1.2: 6_ (Phase 2 bereinigt die dbx), Neustart, Secure Boot an, 2_ → alles 2023. |
 | 10ZiG Thin Client | Kein Secure Boot → nicht betroffen. |
 
 ## Ziel – was „fertig“ heißt
@@ -104,7 +104,7 @@ Booten, `5_Manuell_mit_dbx.cmd` (bzw. `4_`), Secure Boot wieder einschalten.
 **Vorsicht mit „Schlüssel auf Werkseinstellung“:** Das entfernt die von Hand eingetragenen
 2023-CAs wieder. Ist der Boot-Manager schon 2023-signiert, startet Windows danach mit Secure
 Boot **nicht** mehr (roter Fehler beim Start). `1_Pruefen.cmd` warnt, wenn das zutrifft.
-Die Sicherung der alten Schlüssel liegt in `Backups\<PC-Name>\`.
+Die Sicherung der alten Schlüssel liegt in `Backups\<PC>\`.
 
 ## Nie einspielen
 

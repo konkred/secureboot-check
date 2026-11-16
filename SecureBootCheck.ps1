@@ -48,14 +48,30 @@ $scriptDir = Split-Path -Parent $PSCommandPath
 # Protokoll zuerst LOKAL schreiben (ueberlebt abgezogenen Stick), am Ende in den Skriptordner kopieren
 $localDir  = Join-Path $env:ProgramData 'SecureBootCheck'
 # Ordnerstruktur (lokal und im Skriptordner gleich):  Logs\<PC>\   Backups\<PC>\   Rebuild\<PC>\
-function Get-SubDir([string]$Root, [string]$Kind) { $d = Join-Path (Join-Path $Root $Kind) $env:COMPUTERNAME; New-Item -ItemType Directory -Path $d -Force -ErrorAction SilentlyContinue | Out-Null; $d }
+# Geraete-ID fuer die Ordner: <Hostname>_<Seriennummer>, damit gleich benannte PCs (geklonte
+# Images) nicht im selben Ordner landen. Ohne brauchbare Seriennummer: nur der Hostname.
+function Get-Serial {
+    $bad = '^(to be filled.*|default string|system serial number|none|n/?a|not (specified|available|applicable)|o\.?e\.?m\.?|0+|1234567890?|x+|chassis serial number)$'
+    foreach ($q in @(@('Win32_BIOS','SerialNumber'), @('Win32_ComputerSystemProduct','IdentifyingNumber'), @('Win32_SystemEnclosure','SerialNumber'))) {
+        try {
+            $v = "$((Get-CimInstance $q[0] -ErrorAction Stop | Select-Object -First 1).($q[1]))".Trim()
+            if ($v -match $bad) { continue }
+            $v = ($v -replace '[^A-Za-z0-9-]', '')
+            if ($v.Length -ge 4 -and $v -notmatch '^(.)\1+$' -and $v -notmatch '^(TOBEFILLED|DEFAULTSTRING|SYSTEMSERIAL)') { return $v.ToUpper() }
+        } catch {}
+    }
+    ''
+}
+$serial   = Get-Serial
+$deviceId = if ($serial) { "{0}_{1}" -f $env:COMPUTERNAME, $serial } else { $env:COMPUTERNAME }
+function Get-SubDir([string]$Root, [string]$Kind) { $d = Join-Path (Join-Path $Root $Kind) $deviceId; New-Item -ItemType Directory -Path $d -Force -ErrorAction SilentlyContinue | Out-Null; $d }
 $sameDir   = ($scriptDir.TrimEnd('\') -eq $localDir.TrimEnd('\'))
 function Copy-ToScriptDir([string]$Path, [string]$Kind) {
     # Kopiert eine Datei/einen Ordner aus dem lokalen <Kind>\<PC>\ in den gleichen Unterordner im Skriptordner
     if ($sameDir -or -not (Test-Path $Path)) { return $null }
     try { $dest = Get-SubDir $scriptDir $Kind; Copy-Item -Path $Path -Destination $dest -Recurse -Force -ErrorAction Stop; $dest } catch { $null }
 }
-$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBoot', $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
+$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBoot', $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch { Write-Warning "Kein Protokoll moeglich: $_" }
 function Copy-LogToScriptDir {
     try { Stop-Transcript | Out-Null } catch {}
@@ -238,6 +254,7 @@ $cs   = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 $cv   = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 Info ("PC:        {0}" -f $env:COMPUTERNAME)
+Info ("Seriennr.: {0}" -f $(if ($serial) { "$serial  (Ordner: $deviceId)" } else { "nicht auslesbar (Ordner: Hostname)" }))
 Info ("Modell:    {0} {1}" -f $cs.Manufacturer, $cs.Model)
 $biosDate = if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString("yyyy-MM-dd") } else { "?" }
 Info ("BIOS:      {0}  ({1})" -f $bios.SMBIOSBIOSVersion, $biosDate)

@@ -57,16 +57,37 @@ if (-not $isAdmin) {
 $scriptDir = Split-Path -Parent $PSCommandPath
 $localDir  = Join-Path $env:ProgramData 'SecureBootCheck'
 # Ordnerstruktur (lokal und im Skriptordner gleich):  Logs\<PC>\   Backups\<PC>\   Rebuild\<PC>\
-function Get-SubDir([string]$Root, [string]$Kind) { $d = Join-Path (Join-Path $Root $Kind) $env:COMPUTERNAME; New-Item -ItemType Directory -Path $d -Force -ErrorAction SilentlyContinue | Out-Null; $d }
+# Geraete-ID fuer die Ordner: <Hostname>_<Seriennummer>, damit gleich benannte PCs (geklonte
+# Images) nicht im selben Ordner landen. Ohne brauchbare Seriennummer: nur der Hostname.
+function Get-Serial {
+    $bad = '^(to be filled.*|default string|system serial number|none|n/?a|not (specified|available|applicable)|o\.?e\.?m\.?|0+|1234567890?|x+|chassis serial number)$'
+    foreach ($q in @(@('Win32_BIOS','SerialNumber'), @('Win32_ComputerSystemProduct','IdentifyingNumber'), @('Win32_SystemEnclosure','SerialNumber'))) {
+        try {
+            $v = "$((Get-CimInstance $q[0] -ErrorAction Stop | Select-Object -First 1).($q[1]))".Trim()
+            if ($v -match $bad) { continue }
+            $v = ($v -replace '[^A-Za-z0-9-]', '')
+            if ($v.Length -ge 4 -and $v -notmatch '^(.)\1+$' -and $v -notmatch '^(TOBEFILLED|DEFAULTSTRING|SYSTEMSERIAL)') { return $v.ToUpper() }
+        } catch {}
+    }
+    ''
+}
+$serial   = Get-Serial
+$deviceId = if ($serial) { "{0}_{1}" -f $env:COMPUTERNAME, $serial } else { $env:COMPUTERNAME }
+function Get-SubDir([string]$Root, [string]$Kind) { $d = Join-Path (Join-Path $Root $Kind) $deviceId; New-Item -ItemType Directory -Path $d -Force -ErrorAction SilentlyContinue | Out-Null; $d }
 $sameDir   = ($scriptDir.TrimEnd('\') -eq $localDir.TrimEnd('\'))
 function Copy-ToScriptDir([string]$Path, [string]$Kind) {
     # Kopiert eine Datei/einen Ordner aus dem lokalen <Kind>\<PC>\ in den gleichen Unterordner im Skriptordner
     if ($sameDir -or -not (Test-Path $Path)) { return $null }
     try { $dest = Get-SubDir $scriptDir $Kind; Copy-Item -Path $Path -Destination $dest -Recurse -Force -ErrorAction Stop; $dest } catch { $null }
 }
-$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("SecureBootRebuild_{0}_{1}.txt" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
+$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("SecureBootRebuild_{0}_{1}.txt" -f $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch {}
-if (-not $StateDir) { $StateDir = Get-SubDir $localDir 'Rebuild' }
+if (-not $StateDir) {
+    $StateDir = Get-SubDir $localDir 'Rebuild'
+    # Rebuild-Daten aus Version <= 1.2 liegen noch unter dem reinen Hostnamen
+    $legacy = Join-Path (Join-Path $localDir 'Rebuild') $env:COMPUTERNAME
+    if ($legacy -ne $StateDir -and -not (Test-Path (Join-Path $StateDir 'PK.esl')) -and (Test-Path (Join-Path $legacy 'PK.esl'))) { $StateDir = $legacy }
+}
 
 function Section([string]$t) { Write-Host ""; Write-Host ("=" * 70) -ForegroundColor DarkCyan; Write-Host " $t" -ForegroundColor Cyan; Write-Host ("=" * 70) -ForegroundColor DarkCyan }
 function Ok([string]$t)   { Write-Host "  [OK]   $t" -ForegroundColor Green }
@@ -319,7 +340,7 @@ if ($setupMode -ne 1) {
     $bk = Join-Path $StateDir 'Original'; New-Item -ItemType Directory -Path $bk -Force | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $bk 'PK.esl'), $pk);   [IO.File]::WriteAllBytes((Join-Path $bk 'KEK.esl'), $kek)
     [IO.File]::WriteAllBytes((Join-Path $bk 'db.esl'), $db);   if ($dbx) { [IO.File]::WriteAllBytes((Join-Path $bk 'dbx.esl'), $dbx) }
-    "$env:COMPUTERNAME|$model|$($bios.SMBIOSBIOSVersion)|$(Get-Date -Format s)" | Set-Content (Join-Path $StateDir 'device.txt') -Encoding ASCII
+    "$env:COMPUTERNAME|$model|$($bios.SMBIOSBIOSVersion)|$(Get-Date -Format s)|$serial" | Set-Content (Join-Path $StateDir 'device.txt') -Encoding ASCII
     Ok "Gespeichert in $StateDir"
     if (-not $sameDir) {
         # Inhalt von Rebuild\<PC>\ nach <Skriptordner>\Rebuild\<PC>\
@@ -346,12 +367,13 @@ if ($setupMode -ne 1) {
 Section "Phase 2: Zurueckschreiben"
 if (-not (Test-Path (Join-Path $StateDir 'PK.esl'))) {
     Bad "Keine Rebuild-Daten in $StateDir gefunden."
-    Info "Kopie vom Stick angeben:  -StateDir <Stick>\Rebuild\$env:COMPUTERNAME"
+    Info "Kopie vom Stick angeben:  -StateDir <Stick>\Rebuild\$deviceId"
     Info "Oder im Firmware-Setup die Schluessel auf Werkseinstellung zuruecksetzen."
     Finish
 }
 $dev = (Get-Content (Join-Path $StateDir 'device.txt') -ErrorAction SilentlyContinue) -split '\|'
-if ($dev.Count -ge 2 -and ($dev[0] -ne $env:COMPUTERNAME -or $dev[1] -ne $model)) {
+$idMismatch = if ($dev.Count -ge 5 -and $dev[4] -and $serial) { $dev[4] -ne $serial } else { $dev[0] -ne $env:COMPUTERNAME }
+if ($dev.Count -ge 2 -and ($idMismatch -or $dev[1] -ne $model)) {
     Bad ("Rebuild-Daten gehoeren zu '{0}' ({1}), nicht zu diesem Geraet - Abbruch." -f $dev[0], $dev[1]); Finish
 }
 Info ("Daten vom {0}" -f $dev[3])
