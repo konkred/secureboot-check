@@ -1,0 +1,108 @@
+SECURE-BOOT-ZERTIFIKATE 2011 -> 2023  -  Werkzeugkasten
+=======================================================
+
+Laeuft auf Windows 10/11 (aktuelle Updates) mit UEFI + Secure Boot,
+herstellerunabhaengig (HP, Dell, Lenovo, Fujitsu, Surface, Chromebox/MrChromebox,
+Eigenbau, Hyper-V, VMware ...).
+Alle .cmd-Dateien per Doppelklick starten, sie fragen selbst nach Adminrechten.
+Stick vor dem Abziehen "sicher entfernen"!
+
+
+KURZANLEITUNG (bewaehrter Ablauf)
+=================================
+
+  1.) 1_Pruefen.cmd                 Ist-Stand ansehen. Alles gruen? -> fertig.
+
+  2.) 4_Manuell_einspielen.cmd      2023-CAs von Hand in die db (jede Frage mit JA).
+      bzw. 5_Manuell_mit_dbx.cmd    ... wenn 1_ meldet "Sperrliste praktisch LEER".
+
+  3.) 2_Update_anstossen.cmd        Windows installiert den 2023-Boot-Manager
+                                    (und den KEK 2023, falls der Hersteller ihn liefert).
+
+  4.) NEU STARTEN, dann 1_Pruefen.cmd
+
+  DBX nachtraeglich:                5_Manuell_mit_dbx.cmd, neu starten, 1_Pruefen.cmd
+
+  KEK 2023 fehlt danach noch?       Optional 6_Schluessel_neu_aufbauen.cmd (siehe unten).
+                                    Ohne KEK 2023 bootet der PC trotzdem normal.
+
+  Dasselbe von Hand in einer Admin-PowerShell im Stick-Ordner:
+    powershell -ExecutionPolicy Bypass -File .\SecureBootCheck.ps1
+    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute
+    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute -IncludeDbx
+    powershell -ExecutionPolicy Bypass -File .\SecureBootCheck.ps1 -Apply -Force
+    powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1
+
+
+DIE WICHTIGSTE REGEL
+====================
+Nach dem Update im BIOS/UEFI die Secure-Boot-Schluessel NIE loeschen oder auf
+Werkseinstellung zuruecksetzen - ausser 1_Pruefen.cmd meldet in Abschnitt 5b
+"Werkseinstellungen enthalten die Windows UEFI CA 2023".
+Notfall immer: Secure Boot AUS -> booten -> 5_Manuell_mit_dbx.cmd -> Secure Boot AN.
+
+
+DIE DATEIEN IM EINZELNEN
+========================
+1_Pruefen.cmd             Liest alles aus, aendert NICHTS. Immer zuerst.
+2_Update_anstossen.cmd    Normaler Weg: Windows spielt db, KEK und Boot-Manager selbst ein.
+3_Manuell_Trockenlauf.cmd Zeigt, was von Hand eingespielt wuerde. Aendert nichts.
+4_Manuell_einspielen.cmd  Traegt die 2023-CAs VON HAND in die db ein (umgeht Microsofts
+                          Sperre "Firmware_KI" / Ereignis 1802). Jeder Schritt mit JA.
+5_Manuell_mit_dbx.cmd     Wie 4, zusaetzlich die Sperrliste (dbx), falls sie leer ist.
+6_Schluessel_neu_aufbauen.cmd
+                          EXPERTEN: baut KEK/db/dbx ueber den Setup Mode neu auf und setzt
+                          dabei auch den Microsoft KEK 2023. Zwei Durchlaeufe:
+                          1. Lauf vorbereiten -> im Firmware-Setup Schluessel LOESCHEN
+                          ("Clear Secure Boot Keys") -> Windows starten -> 2. Lauf schreibt
+                          alles zurueck (Original-PK zuletzt). Danach neu starten, dann
+                          5_Manuell_mit_dbx.cmd, 2_Update_anstossen.cmd (-> 1808),
+                          neu starten, 1_Pruefen.cmd.
+                          Die PK-Fehlermeldung im 2. Lauf ist bei HP normal - die Firmware
+                          stellt ihren PK beim Neustart selbst wieder her.
+
+Ablage (lokal in C:\ProgramData\SecureBootCheck\ und als Kopie hier auf dem Stick):
+  Logs\<PC-Name>\        Protokolle aller Laeufe
+  Backups\<PC-Name>\     Sicherungen von PK/KEK/db/dbx vor jedem manuellen Schreiben
+  Rebuild\<PC-Name>\     Daten fuer 6_Schluessel_neu_aufbauen (zwischen den zwei Laeufen)
+
+
+ERFAHRUNGEN (Stand 16.11.2026)
+==============================
+HP ProDesk 400 G5     Kurzanleitung + 6_ -> alles 2023 (KEK, db, Boot-Manager, dbx).
+HP EliteBook 840 G3   Kurzanleitung + 6_ -> alles 2023.
+Chromebox (Google Teemo, MrChromebox-UEFI)
+                      Nur 2_Update_anstossen.cmd -> alles 2023. Firmware bringt die
+                      2023-Zertifikate schon mit, Schluessel-Reset dort ungefaehrlich.
+                      Firmware-Setup: Esc beim Start.
+HP Compaq Pro 6300    db + Boot-Manager 2023 ok. KEK 2023 und dbx NICHT moeglich:
+                      Firmware lehnt dbx ab (0xC0000022), "Clear Secure Boot Keys" laedt
+                      die Werksschluessel statt Setup Mode -> 6_ NICHT benutzen.
+10ZiG Thin Client     Kein Secure Boot -> nicht betroffen.
+
+
+ZIEL / WAS "FERTIG" HEISST
+==========================
+Pflicht: db hat "Windows UEFI CA 2023" und der Boot-Manager kettet zur
+         "Windows UEFI CA 2023". Damit startet der PC auch nach Ablauf der 2011er.
+Kuer:    KEK 2023 (fuer kuenftige db/dbx-Updates) und volle dbx (~300+ Eintraege).
+Ein verbleibendes "AvailableUpdates = 0x4000" ist nur eine Bedingung, kein Fehler.
+
+
+NOTFALL (PC startet nach einem Schritt nicht)
+=============================================
+Ins Firmware-Setup (BIOS/UEFI) und Secure Boot AUSSCHALTEN. Das ist immer sicher.
+1_Pruefen.cmd zeigt die Taste fuer den erkannten Hersteller an (HP: F10).
+Booten, 5_Manuell_mit_dbx.cmd (bzw. 4_), Secure Boot wieder einschalten.
+
+VORSICHT mit "Schluessel auf Werkseinstellung": Das entfernt die von Hand eingetragenen
+2023-CAs wieder. Ist der Boot-Manager schon 2023-signiert, startet Windows danach mit
+Secure Boot NICHT mehr (roter Fehler beim Start). 1_Pruefen.cmd warnt, wenn das zutrifft.
+Die Sicherung der alten Schluessel liegt in Backups\<PC-Name>\.
+
+
+NIE EINSPIELEN
+==============
+DBXUpdate2024*.bin sperrt die alte "Windows Production PCA 2011". Danach starten der
+alte Boot-Manager und alle aelteren Windows-/Rettungs-USB-Sticks nicht mehr.
+Die Skripte ueberspringen diese Dateien immer.
