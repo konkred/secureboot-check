@@ -6,6 +6,7 @@ herstellerunabhaengig (HP, Dell, Lenovo, Fujitsu, Surface, Chromebox/MrChromebox
 Eigenbau, Hyper-V, VMware ...).
 Alle .cmd-Dateien per Doppelklick starten, sie fragen selbst nach Adminrechten.
 Stick vor dem Abziehen "sicher entfernen"!
+Aktuelle Fassung: https://github.com/konkred/secureboot-check  (README.md = diese Datei)
 
 
 KURZANLEITUNG (bewaehrter Ablauf)
