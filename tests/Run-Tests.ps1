@@ -118,7 +118,7 @@ if ($haveCerts) {
 
 # ------------------------------------------------------------------ 2a. Manual (3_/4_/5_)
 Head "SecureBootManual.ps1: Parser und Entscheidungen"
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-Signers','Unwrap-Content','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason'))) { . ([scriptblock]::Create($t)) }
+foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-Signers','Unwrap-Content','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason','Get-EslHashes','Get-StepSkipReason'))) { . ([scriptblock]::Create($t)) }
 
 $e = Parse-Esl $hashEsl
 Check "Hashliste: 5 Hashes, gueltig" ($e.Hashes -eq 5 -and $e.Valid)
@@ -159,6 +159,23 @@ if ($haveCerts) {
     $p = P 'KEKUpdate_2023.bin'
     Check "KEK-Datei: Ziel KEK" ((Get-PayloadTarget $p) -eq 'KEK')
 }
+
+Head "SecureBootManual.ps1: dbx schrittweise (8_)"
+$h1 = New-HashEsl 3; $h2 = New-HashEsl 2
+Check "Get-EslHashes zaehlt Hashes" ((Get-EslHashes $h1).Count -eq 3)
+$have = Get-EslHashes $h1
+Check "Get-EslHashes erkennt Neues" (@(Get-EslHashes (Cat-Bytes @($h1, $h2)) | Where-Object { -not $have.Contains($_) }).Count -eq 2)
+Check "Get-EslHashes ignoriert Muell" ((Get-EslHashes $garbage).Count -eq 5)
+$p = P 'dbxupdate.bin'
+Check "x64-Datei erlaubt" ($null -eq (Get-StepSkipReason $p 'dbx_x64_Legacy\dbx_x64_Legacy.efiauth2'))
+Check "amd64-Ordner erlaubt" ($null -eq (Get-StepSkipReason $p 'amd64\DBXUpdate.bin'))
+Check "x86-Datei abgelehnt" ([bool](Get-StepSkipReason $p 'x86\DBXUpdate.bin'))
+Check "ia32-Datei abgelehnt" ([bool](Get-StepSkipReason $p 'dbx_ia32_Legacy.efiauth2'))
+Check "arm64-Datei abgelehnt" ([bool](Get-StepSkipReason $p 'arm64\DBXUpdate.bin'))
+$svn = P 'dbxupdate.bin'; $svn = $svn.PSObject.Copy(); $svn.Name = 'DBXUpdateSVN.bin'
+Check "SVN-Datei abgelehnt" ([bool](Get-StepSkipReason $svn 'DBXUpdateSVN.bin'))
+Check "DBXUpdate2024 abgelehnt" ([bool](Get-StepSkipReason (P 'DBXUpdate2024.bin') 'DBXUpdate2024.bin'))
+Check "Kaputte Datei abgelehnt" ([bool](Get-StepSkipReason (P 'dbx_garbage.bin') 'dbx_garbage.bin'))
 
 # ------------------------------------------------------------------ 2b. Rebuild (6_/7_)
 Head "SecureBootRebuild.ps1: Parser und dbx-Entscheidung"

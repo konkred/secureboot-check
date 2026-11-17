@@ -224,7 +224,7 @@ function Get-ClearHint {
     $cs = Get-CimInstance Win32_ComputerSystem; $m = "$($cs.Manufacturer)"; $mo = "$($cs.Model)"
     if ($mo -match 'Virtual Machine' -and $m -match 'Microsoft') { return 'Hyper-V: nicht moeglich (Vorlage verwenden)' }
     if ($m -match 'VMware')      { return 'VMware: nicht noetig/anders (NVRAM)' }
-    if ($m -match 'HP|Hewlett')  { return 'F10 -> Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> "Clear Secure Boot Keys" (Bestaetigungscode eingeben). ACHTUNG: aeltere HP-Firmwares (z.B. Compaq Pro 6300) laden dabei die Werksschluessel statt in den Setup Mode zu gehen - siehe LIESMICH.' }
+    if ($m -match 'HP|Hewlett')  { return 'F10 -> Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> "Clear Secure Boot Keys" (Bestaetigungscode eingeben). Gibt es dort "Key Ownership", vorher auf "Custom Keys" stellen: mit "HP Keys" laden manche Firmwares (z.B. Compaq Pro 6300) nach dem Loeschen wieder die Werksschluessel statt in den Setup Mode zu gehen - siehe LIESMICH.' }
     if ($m -match 'Google' -or "$((Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion)" -match 'MrChromebox') { return 'Esc beim Start -> Device Manager -> Secure Boot Configuration -> Secure Boot Mode "Custom" -> Custom Secure Boot Options -> PK Options -> Delete PK' }
     if ($m -match 'Dell')        { return 'F2 -> Secure Boot -> Expert Key Management -> Custom Mode an -> "Delete All Keys"' }
     if ($m -match 'Lenovo')      { return 'F1/F2 -> Security -> Secure Boot -> "Reset to Setup Mode" bzw. "Clear All Secure Boot Keys"' }
@@ -337,7 +337,12 @@ if ($setupMode -ne 1) {
             Bad "Seit dem letzten Lauf sind Eintraege aus der db VERSCHWUNDEN:"
             foreach ($c in $lost) { Info ("  - {0}" -f (Get-CN $c.Subject)) }
             Bad "Die Firmware hat beim 'Schluessel loeschen' offenbar die WERKSSCHLUESSEL geladen statt in den Setup Mode zu gehen."
-            Info "Auf diesem Geraet funktioniert der Setup-Mode-Weg damit NICHT."
+            Info "Auf diesem Geraet funktioniert der Setup-Mode-Weg so NICHT."
+            if ($model -match 'HP|Hewlett') {
+                Info "HP: Gibt es im Firmware-Setup unter Secure Boot Configuration die Einstellung 'Key Ownership',"
+                Info "    vor dem naechsten Versuch auf 'Custom Keys' statt 'HP Keys' stellen. Mit 'HP Keys' laedt die"
+                Info "    Firmware nach dem Loeschen moeglicherweise immer wieder ihre Werksschluessel."
+            }
             Info "Wiederherstellen:  (falls Windows nicht startet: Secure Boot im Firmware-Setup AUS)"
             Info "  1. 5_Manuell_mit_dbx.cmd   (traegt die 2023-CAs und die dbx wieder ein)"
             Info "  2. Secure Boot wieder AN, neu starten, 1_Pruefen.cmd"

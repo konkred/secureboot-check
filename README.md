@@ -100,7 +100,8 @@ Dieser Ablauf hat sich auf allen getesteten Geräten bewährt:
 | 3 | `2_Update_anstossen.cmd` | Windows tauscht den Boot-Manager gegen die 2023-Fassung. |
 | 4 | Neustart, dann `1_Pruefen.cmd` | Kontrolle |
 
-Wird die Sperrliste in Schritt 2 abgelehnt oder fehlt nach Schritt 4 der KEK 2023, kommt optional
+Wird die Sperrliste in Schritt 2 abgelehnt, hilft eventuell `8_dbx_schrittweise.cmd`. Fehlt nach
+Schritt 4 der KEK 2023 oder bleibt die Sperrliste leer, kommt optional
 `6_Schluessel_neu_aufbauen.cmd` dazu (siehe unten). Ohne KEK 2023 startet der PC trotzdem normal.
 
 ## Die Werkzeuge im Detail
@@ -156,7 +157,7 @@ Den KEK kann dieser Weg nicht eintragen, denn dafür bräuchte es eine Signatur 
 Herstellers.
 
 Manche Firmwares lehnen das Anhängen an die dbx mit `0xC0000022` ab. Das ist harmlos, die dbx
-bleibt dann einfach, wie sie war.
+bleibt dann einfach, wie sie war. Den nächsten Versuch macht `8_dbx_schrittweise.cmd`.
 
 ### `6_Schluessel_neu_aufbauen.cmd`
 
@@ -181,7 +182,15 @@ Wie die Firmware mit dem zurückgeschriebenen PK umgeht, ist je nach Hersteller 
 |---|---|---|
 | nimmt den PK an, User Mode erst nach dem Neustart | Lenovo ThinkCentre M93 | alles bleibt erhalten |
 | lehnt den PK ab, trägt ihren Werks-PK beim Neustart selbst ein | HP ProDesk 400 G5, EliteBook 840 G3 | KEK und db bleiben, die dbx fällt zurück und wird mit `5_` nachgezogen |
-| lädt beim Löschen die Werksschlüssel statt in den Setup Mode zu gehen | HP Compaq Pro 6300 | dieser Weg ist nicht möglich |
+| lädt beim Löschen die Werksschlüssel statt in den Setup Mode zu gehen | HP Compaq Pro 6300 | so nicht möglich, siehe Hinweis zu „Key Ownership“ |
+
+**HP und „Key Ownership“:** Manche HP-Firmwares haben unter Secure Boot Configuration die
+Einstellung „Key Ownership“ mit den Werten „HP Keys“ und „Custom Keys“. Steht sie auf HP Keys, lädt
+die Firmware nach „Clear Secure Boot Keys“ möglicherweise beim nächsten Start wieder ihre
+Werksschlüssel, statt in den Setup Mode zu gehen. Vor einem erneuten Versuch mit `6_` deshalb
+nachsehen, ob es die Einstellung gibt, und sie auf Custom Keys stellen. Ob die Firmware danach den
+zurückgeschriebenen HP-PK annimmt, ist nicht getestet. Das Skript erkennt nach dem Neustart, wenn
+doch wieder die Werksschlüssel geladen wurden, und hält an.
 
 Die dbx übernimmt das Skript ausschließlich als saubere SHA256-Hashlisten. Vor dem Schreiben prüft
 es alle Daten auf ein gültiges Format.
@@ -204,6 +213,38 @@ Wie bei `6_` geht das nur im Setup Mode:
 Enthält die gewählte Sicherung die Windows UEFI CA 2023 nicht, warnt das Skript: Ist der
 Boot-Manager schon getauscht, muss Secure Boot dann aus bleiben, bis `5_` die Zertifikate wieder
 eingetragen hat. Eine beschädigte dbx in der Sicherung wird vor dem Schreiben bereinigt.
+
+### `8_dbx_schrittweise.cmd`
+
+Für Firmwares, die die aktuelle Sperrliste von Windows mit `0xC0000022` ablehnen. Die Liste ist
+inzwischen gut 24 KB groß. Ältere Firmwares haben teils eine Grenze pro Schreibvorgang oder wenig
+freien Variablenspeicher. Früher hat Windows die Sperren in mehreren kleineren Updates eingetragen;
+dieser Starter macht das nach.
+
+Das Skript sammelt alle dbx-Dateien aus dem Ordner `dbx_schrittweise` neben den Skripten (auch aus
+Unterordnern) und aus `SecureBootUpdates`. Es
+
+1. sortiert aus, was nicht passt: andere Prozessorarchitekturen (x86, ARM), SVN-Einträge, die
+   PCA-2011-Sperre, Dateien mit unsauberem Format und Dateien, deren Hashes schon alle in der dbx
+   stehen,
+2. zeigt eine Tabelle mit Größe, Datum, Anzahl Hashes und wie viele davon neu wären,
+3. schreibt nach einem `JA` eine Datei nach der anderen, die kleinste zuerst, und macht nach einer
+   Ablehnung mit der nächsten weiter,
+4. wertet am Ende aus: Wird schon die kleinste Datei abgelehnt, liegt es nicht an der Größe. Werden
+   kleine Dateien angenommen und große abgelehnt, nennt es die Grenze.
+
+Die zusätzlichen Dateien stellt Microsoft im öffentlichen GitHub-Repository
+[microsoft/secureboot_objects](https://github.com/microsoft/secureboot_objects) bereit. Geeignet
+sind die mit dem KEK 2011 signierten Fassungen für x64:
+
+| Ordner im Repository | Inhalt |
+|---|---|
+| `PostSignedObjects/SignedByKEK2011/dbx_x64_Legacy` | die vollständige Liste (etwa 17 KB) und zwei Dateien mit je einem einzelnen Hash (etwa 3,4 KB) |
+| `PostSignedObjects/DBX/amd64` | `DBXUpdate.bin`, die größte Fassung (etwa 24 KB); laut Microsoft veraltet, wird 2027 entfernt |
+
+Die Dateien herunterladen und in `dbx_schrittweise` legen. Die Endung `.efiauth2` kann bleiben. Die
+Einzel-Hash-Dateien sind die wichtigste Probe: Nimmt die Firmware nicht einmal die an, lehnt sie das
+Anhängen an die dbx grundsätzlich ab. Der Ordner ist per `.gitignore` vom Repository ausgeschlossen.
 
 ## Ergebnis prüfen
 
@@ -267,6 +308,7 @@ Unterordner neben den Skripten kopiert, also z.B. auf den USB-Stick.
 | `Backups\<PC>\` | Sicherung von PK, KEK, db und dbx vor jedem Schreiben |
 | `Rebuild\<PC>\` | Daten für `6_Schluessel_neu_aufbauen` zwischen den beiden Läufen |
 | `Uebersicht.csv` | eine Zeile pro Lauf von `1_` und `2_`, über alle Geräte |
+| `dbx_schrittweise\` | selbst heruntergeladene dbx-Dateien für `8_` (liegt nur neben den Skripten) |
 
 Protokolldateien heißen nach Datum und Uhrzeit mit Sekunden, und jedes Protokoll nennt die
 Skriptversion.
@@ -287,7 +329,7 @@ Stand 17.11.2026, Skriptversion 1.3.
 | Lenovo ThinkCentre M93 (10A4) | Schnellstart, dann `6_` | alles auf 2023; die dbx ging erst über `6_` |
 | Lenovo ThinkCentre M93p (10AA) | Schnellstart, dann `6_` | alles auf 2023 (siehe unten) |
 | Chromebox Google Teemo (MrChromebox) | nur `2_` | alles auf 2023; die Firmware bringt die 2023-Zertifikate schon mit, ein Reset ist hier ungefährlich |
-| HP Compaq Pro 6300 | Schnellstart | db und Boot-Manager auf 2023; KEK und dbx nicht möglich, `6_` dort nicht benutzen |
+| HP Compaq Pro 6300 | Schnellstart | db und Boot-Manager auf 2023; KEK und dbx bisher nicht möglich. Offen: `8_` und die Einstellung „Key Ownership“ |
 | 10ZiG Thin Client | | kein Secure Boot, nicht betroffen |
 
 **Fehler in Version 1.1 (behoben in 1.2):** Auf dem M93p mit Windows-Build 19044.7725 lagen die
@@ -317,6 +359,8 @@ powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute -Includ
 powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1
 # 7_Sicherung_zurueckspielen
 powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1 -Restore
+# 8_dbx_schrittweise
+powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute -DbxStepwise
 ```
 
 Weitere Parameter:
@@ -326,6 +370,9 @@ Weitere Parameter:
 | `-NoPause` | alle | am Ende nicht auf Enter warten |
 | `-PayloadDir` | Manual, Rebuild | anderer Ordner mit Update-Dateien statt `SecureBootUpdates` |
 | `-StateDir` | Rebuild | Rebuild-Daten von einem anderen Ort lesen, z.B. vom Stick |
+| `-StepDir` | Manual mit `-DbxStepwise` | anderer Ordner für die zusätzlichen dbx-Dateien statt `dbx_schrittweise` |
+
+Ohne `-Execute` zeigt `-DbxStepwise` nur die Tabelle und schreibt nichts.
 
 ## Selbsttest
 

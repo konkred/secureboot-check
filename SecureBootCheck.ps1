@@ -93,7 +93,7 @@ function Get-VendorInfo {
     } elseif ($m -match 'VMware') {
         $v.Vendor = 'VMware'; $v.Key = '(VM ausgeschaltet) VM-Einstellungen'; $v.Reset = 'VM Options -> Boot Options -> Secure Boot aus; NVRAM-Datei (.nvram) loeschen setzt die Schluessel zurueck'
     } elseif ($m -match 'HP|Hewlett') {
-        $v.Vendor = 'HP'; $v.Key = 'F10'; $v.Reset = 'Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> Secure-Boot-Schluessel auf Werkseinstellung zuruecksetzen'; $v.Extra = 'Falls vorhanden: "Sure Start Secure Boot Keys Protection" deaktivieren.'
+        $v.Vendor = 'HP'; $v.Key = 'F10'; $v.Reset = 'Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> Secure-Boot-Schluessel auf Werkseinstellung zuruecksetzen'; $v.Extra = 'Falls vorhanden: "Key Ownership" zeigt, ob HP- oder eigene Schluessel gelten (wichtig fuer 6_). "Sure Start Secure Boot Keys Protection" deaktivieren.'
     } elseif ($m -match 'Dell') {
         $v.Vendor = 'Dell'; $v.Key = 'F2'; $v.Reset = 'Secure Boot -> Expert Key Management -> Restore Settings (Factory)'
     } elseif ($m -match 'Lenovo') {
@@ -351,7 +351,7 @@ if ($null -ne $sbOn -and -not $noKeys) {
         if ($dbx.Valid) { Ok "Sperrliste ist formal in Ordnung" }
         if ($dbx.Hashes -lt 50 -and $dbx.Certs.Count -eq 0) {
             Warn "Sperrliste ist praktisch LEER - es wurden nie DBX-Updates eingespielt"
-            Add-Finding 'Warn' 'dbx ist (fast) leer: bekannte unsichere Bootloader (z.B. BlackLotus-Luecke) sind nicht gesperrt.'
+            Add-Finding 'Warn' 'dbx ist (fast) leer: bekannte unsichere Bootloader (z.B. BlackLotus-Luecke) sind nicht gesperrt. Abhilfe: 5_Manuell_mit_dbx.cmd; lehnt die Firmware das ab, 8_dbx_schrittweise.cmd.'
         }
         foreach ($c in $dbx.Certs) { Info ("  gesperrt: {0}" -f (Get-CN $c.Subject)) }
         if ($dbx.Certs | Where-Object { $_.Subject -match 'Windows Production PCA 2011' }) {
