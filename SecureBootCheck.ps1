@@ -291,8 +291,12 @@ $setup = $null
 if ($null -ne $sbOn) { try { $setup = (Get-SecureBootUEFI -Name SetupMode -ErrorAction Stop).Bytes[0] } catch {} }
 $pkPresent = $false
 if ($null -ne $sbOn) { try { $pkPresent = [bool](Get-SecureBootUEFI -Name PK -ErrorAction Stop).Bytes } catch {} }
-# Geraet ohne jegliche Schluessel und ohne Secure Boot (z.B. Thin Clients): von den Zertifikaten nicht betroffen
-$noKeys = ($sbOn -eq $false -and $setup -eq 1 -and -not $pkPresent)
+$otherKeys = $false
+if ($null -ne $sbOn) { foreach ($n in 'KEK','db') { try { if ((Get-SecureBootUEFI -Name $n -ErrorAction Stop).Bytes) { $otherKeys = $true } } catch {} } }
+# Geraet ohne jegliche Schluessel und ohne Secure Boot (z.B. Thin Clients): von den Zertifikaten nicht betroffen.
+# Setup Mode MIT KEK/db, aber ohne PK ist dagegen ein halb fertiger Neuaufbau (z.B. HP mit "Custom Keys").
+$noKeys = ($sbOn -eq $false -and $setup -eq 1 -and -not $pkPresent -and -not $otherKeys)
+$pkMissing = ($setup -eq 1 -and -not $pkPresent -and $otherKeys)
 
 if ($sbOn -eq $true)      { Ok "Secure Boot ist AKTIV" }
 elseif ($noKeys) {
@@ -300,11 +304,15 @@ elseif ($noKeys) {
     Info "Dieses Geraet nutzt Secure Boot nicht."
     Add-Finding 'Ok' 'NICHT BETROFFEN: ohne Secure Boot prueft die Firmware keine Signaturen, abgelaufene Zertifikate spielen keine Rolle. Nichts zu tun. (Nur falls das Firmware-Setup doch eine Secure-Boot-Option bietet: dort Standard-Schluessel laden, Secure Boot an, dann erneut pruefen.)'
 }
-elseif ($sbOn -eq $false) { Bad "Secure Boot ist AUS (UEFI vorhanden)"; Add-Finding 'Bad' 'Secure Boot im Firmware-Setup aktivieren (Legacy/CSM aus).' }
+elseif ($sbOn -eq $false) { Bad "Secure Boot ist AUS (UEFI vorhanden)"; if (-not $pkMissing) { Add-Finding 'Bad' 'Secure Boot im Firmware-Setup aktivieren (Legacy/CSM aus).' } }
 else                      { Bad "Kein UEFI / Legacy-Boot - Secure Boot nicht moeglich"; Add-Finding 'Warn' 'System bootet im Legacy-Modus und nutzt kein Secure Boot - von den Zertifikaten nicht betroffen. Fuer Secure Boot: auf UEFI umstellen (MBR2GPT) und Secure Boot aktivieren.' }
 
 if ($null -ne $sbOn -and -not $noKeys) {
-    if ($setup -eq 1) { Warn "Firmware ist im SETUP MODE (keine Schluessel / PK geloescht)"; Add-Finding 'Warn' 'Firmware im Setup Mode: Schluessel fehlen. Im Firmware-Setup Standard-Schluessel laden bzw. Phase 2 von 6_Schluessel_neu_aufbauen.cmd ausfuehren.' }
+    if ($pkMissing) {
+        Bad "Firmware ist im SETUP MODE: KEK und db sind vorhanden, aber KEIN PK"
+        Add-Finding 'Bad' ("Setup Mode ohne PK: KEK und db sind da, der PK fehlt. So laesst sich Secure Boot nicht einschalten. Typisch, wenn die Firmware beim Neuaufbau (6_) den Original-PK abgelehnt hat, z.B. HP mit Key Ownership 'Custom Keys'. Zurueck zum sicheren Stand: Firmware-Setup (Taste {0}), Secure Boot AUS, Werksschluessel laden (HP: Key Ownership 'HP Keys'), Windows starten, 5_Manuell_mit_dbx.cmd, dann Secure Boot wieder AN." -f $vi.Key)
+    }
+    elseif ($setup -eq 1) { Warn "Firmware ist im SETUP MODE (keine Schluessel / PK geloescht)"; Add-Finding 'Warn' 'Firmware im Setup Mode: Schluessel fehlen. Im Firmware-Setup Standard-Schluessel laden bzw. Phase 2 von 6_Schluessel_neu_aufbauen.cmd ausfuehren.' }
     elseif ($setup -eq 0) { Ok "User Mode (Schluessel geladen)" }
 }
 
@@ -609,6 +617,7 @@ function Write-Overview {
     # Eine Zeile pro Lauf, im lokalen Ordner und im Skriptordner (z.B. Stick): Uebersicht aller Geraete
     function YN($v) { if ($v -eq $true) { 'ja' } elseif ($v -eq $false) { 'nein' } else { '?' } }
     $status = if ($noKeys) { 'nicht betroffen' }
+              elseif ($pkMissing) { 'Setup Mode, PK fehlt' }
               elseif ($null -eq $sbOn) { 'kein UEFI' }
               elseif ($dbx -and -not $dbx.Valid) { 'dbx beschaedigt' }
               elseif ($allDone -and $dbx -and $dbx.Hashes -ge 50) { 'fertig' }

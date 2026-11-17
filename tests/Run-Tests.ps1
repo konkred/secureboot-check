@@ -118,7 +118,7 @@ if ($haveCerts) {
 
 # ------------------------------------------------------------------ 2a. Manual (3_/4_/5_)
 Head "SecureBootManual.ps1: Parser und Entscheidungen"
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-Signers','Unwrap-Content','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason','Get-EslHashes','Get-StepSkipReason'))) { . ([scriptblock]::Create($t)) }
+foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-Cms','Get-Signers','Get-SignerKek','Unwrap-Content','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason','Get-EslHashes','Get-StepSkipReason'))) { . ([scriptblock]::Create($t)) }
 
 $e = Parse-Esl $hashEsl
 Check "Hashliste: 5 Hashes, gueltig" ($e.Hashes -eq 5 -and $e.Valid)
@@ -141,6 +141,11 @@ Check "Auth-Datei gelesen, 8 Hashes" ($p -and $p.Hashes -eq 8 -and $p.Valid -and
 Check "Ziel dbx" ((Get-PayloadTarget $p) -eq 'dbx')
 Check "dbx ohne -IncludeDbx: uebersprungen" ([bool](Get-SkipReason $p 'dbx' 0 $false))
 Check "dbx mit -IncludeDbx: erlaubt" ($null -eq (Get-SkipReason $p 'dbx' 0 $true))
+Check "Dummy-Signatur: KEK unbekannt" ($p.SignedBy -eq '?')
+$k23 = $p.PSObject.Copy(); $k23.SignedBy = '2023'
+Check "Mit KEK 2023 signiert, KEK 2023 fehlt: abgelehnt" ((Get-SkipReason $k23 'dbx' 0 $true $false) -match 'KEK 2023')
+Check "Mit KEK 2023 signiert, KEK 2023 da: erlaubt" ($null -eq (Get-SkipReason $k23 'dbx' 0 $true $true))
+Check "Schrittmodus: KEK-2023-Datei ohne KEK 2023 abgelehnt" ([bool](Get-StepSkipReason $k23 'dbxupdate.bin' $false))
 $p = P 'dbxupdate_wrapped.bin'
 Check "Aelteres Format: Kopf erkannt und abgeschnitten" ($p -and $p.Wrapped -and $p.Valid -and $p.Hashes -eq 5)
 $p = P 'dbx_garbage.bin'
@@ -212,13 +217,14 @@ Head ("Echte Dateien aus tests\fixtures ({0} Geraete)" -f $sets.Count)
 if ($sets.Count -eq 0) { Write-Host "         keine vorhanden - auf einem Windows-PC Testdateien_sammeln.cmd ausfuehren" }
 foreach ($s in $sets) {
     # Manual-Funktionen fuer die Payloads
-    foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Parse-Esl','Unwrap-Content','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason'))) { . ([scriptblock]::Create($t)) }
+    foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Parse-Esl','Unwrap-Content','Get-Cms','Get-Signers','Get-SignerKek','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason'))) { . ([scriptblock]::Create($t)) }
     foreach ($f in @(Get-ChildItem (Join-Path $s.FullName 'SecureBootUpdates') -Filter *.bin -ErrorAction SilentlyContinue)) {
         $p = Read-AuthPayload $f.FullName
-        if (-not $p) { Check "$($s.Name)\$($f.Name): als Auth-Datei erkannt" $false; continue }
+        if (-not $p) { Write-Host ("         {0,-34} kein signiertes Variablen-Update (z.B. Sammeldatei), nicht geprueft" -f $f.Name); continue }
         $target = Get-PayloadTarget $p
         $skip = Get-SkipReason $p $target 1 $true
-        Write-Host ("         {0,-34} Ziel {1,-3}  {2} Zert. {3,5} Hashes  {4}{5}" -f $f.Name, $target, $p.Certs.Count, $p.Hashes, $(if ($p.Wrapped) { 'altes Format  ' } else { '' }), $(if ($skip) { "-> nein: $skip" } else { '-> erlaubt' }))
+        Write-Host ("         {0,-34} Ziel {1,-3}  KEK {2,-4} {3} Zert. {4,5} Hashes  {5}{6}" -f $f.Name, $target, $p.SignedBy, $p.Certs.Count, $p.Hashes, $(if ($p.Wrapped) { 'altes Format  ' } else { '' }), $(if ($skip) { "-> nein: $skip" } else { '-> erlaubt' }))
+        Check "$($s.Name)\$($f.Name): signierender KEK erkannt" ($p.SignedBy -ne '?')
         Check "$($s.Name)\$($f.Name): Inhalt erkannt" ($target -ne '?' -or $f.Name -notmatch 'db|kek')
         if (-not $p.Valid -or $p.Other -gt 0) { Check "$($s.Name)\$($f.Name): unsauber, daher abgelehnt" ([bool]$skip) }
         if ($f.Name -match 'DBXUpdate2024') { Check "$($s.Name)\$($f.Name): nie eingespielt" ([bool]$skip) }

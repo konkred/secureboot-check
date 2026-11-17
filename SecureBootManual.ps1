@@ -189,21 +189,36 @@ function Get-VarEsl([string]$Name) {
     try { Parse-Esl (Get-SecureBootUEFI -Name $Name -ErrorAction Stop).Bytes } catch { $null }
 }
 
-function Get-Signers([byte[]]$sig) {
+function Get-Cms([byte[]]$sig) {
     # PKCS7 aus EFI_VARIABLE_AUTHENTICATION_2: oft nacktes SignedData ohne ContentInfo -> ggf. einpacken
     $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
-    try { $cms.Decode($sig) } catch {
-        try {
-            $oid = [byte[]](0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
-            function DerLen([int]$n) { if ($n -lt 128) { ,[byte[]]@($n) } elseif ($n -lt 256) { ,[byte[]]@(0x81,$n) } else { ,[byte[]]@(0x82, ($n -shr 8), ($n -band 0xFF)) } }
-            $a0  = [byte[]](@(0xA0) + (DerLen $sig.Length) + $sig)
-            $seq = [byte[]]($oid + $a0)
-            $ci  = [byte[]](@(0x30) + (DerLen $seq.Length) + $seq)
-            $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
-            $cms.Decode($ci)
-        } catch { return @() }
-    }
+    try { $cms.Decode($sig); return $cms } catch {}
+    try {
+        $oid = [byte[]](0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
+        function DerLen([int]$n) { if ($n -lt 128) { ,[byte[]]@($n) } elseif ($n -lt 256) { ,[byte[]]@(0x81,$n) } else { ,[byte[]]@(0x82, ($n -shr 8), ($n -band 0xFF)) } }
+        $a0  = [byte[]](@(0xA0) + (DerLen $sig.Length) + $sig)
+        $seq = [byte[]]($oid + $a0)
+        $ci  = [byte[]](@(0x30) + (DerLen $seq.Length) + $seq)
+        $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
+        $cms.Decode($ci)
+        return $cms
+    } catch { return $null }
+}
+
+function Get-Signers([byte[]]$sig) {
+    $cms = Get-Cms $sig
+    if (-not $cms) { return @() }
     @($cms.SignerInfos | ForEach-Object { if ($_.Certificate) { Get-CN $_.Certificate.Subject } })
+}
+
+function Get-SignerKek([byte[]]$sig) {
+    # Mit welchem Microsoft-KEK ist die Datei signiert? Die Firmware nimmt sie nur an, wenn dieser KEK eingetragen ist.
+    $cms = Get-Cms $sig
+    if (-not $cms) { return '?' }
+    $names = (@($cms.Certificates) | ForEach-Object { $_.Subject; $_.Issuer }) -join '|'
+    if ($names -match 'KEK 2K CA 2023') { return '2023' }
+    if ($names -match 'KEK CA 2011')    { return '2011' }
+    '?'
 }
 
 function Unwrap-Content([byte[]]$c) {
@@ -249,6 +264,7 @@ function Read-AuthPayload([string]$Path) {
         Valid   = $esl.Valid
         Wrapped = $uw.Wrapped
         Signers = Get-Signers $sig
+        SignedBy = Get-SignerKek $sig
     }
 }
 
@@ -262,11 +278,15 @@ function Get-PayloadTarget($p) {
     '?'
 }
 
-function Get-SkipReason($p, [string]$Target, [int]$MissingCount, [bool]$WithDbx) {
+function Get-SkipReason($p, [string]$Target, [int]$MissingCount, [bool]$WithDbx, [bool]$HasKek2023 = $true) {
     # $null = darf eingespielt werden, sonst der Grund fuers Ueberspringen
     if ($p.Name -match 'DBXUpdate2024') { return 'SPERRT die alte Windows-CA 2011 (Dateiname) - wird von diesem Skript NIE eingespielt' }
     if (-not $p.Valid)   { return 'Format nicht sauber erkannt - zu riskant' }
     if ($p.Other -gt 0)  { return 'enthaelt unbekannte Eintragstypen - zu riskant' }
+    if ($p.SignedBy -eq '2023' -and -not $HasKek2023) {
+        $alt = if ($Target -eq 'dbx') { ' (Ersatz: KEK-2011-Fassung ueber 8_dbx_schrittweise.cmd)' } else { '' }
+        return "mit dem KEK 2023 signiert, der auf diesem PC fehlt - die Firmware wuerde ablehnen$alt"
+    }
     if ($Target -eq '?') { return 'Inhalt nicht erkannt' }
     if ($Target -eq 'dbx' -and ($p.Certs | Where-Object { $_.Subject -match 'Production PCA 2011' })) {
         return 'SPERRT die alte Windows-CA 2011 - wird von diesem Skript NIE eingespielt (aktueller Boot-Manager und alle aelteren Boot-Medien wuerden nicht mehr starten)'
@@ -297,14 +317,14 @@ function Get-EslHashes([byte[]]$b) {
     ,$set
 }
 
-function Get-StepSkipReason($p, [string]$RelPath) {
+function Get-StepSkipReason($p, [string]$RelPath, [bool]$HasKek2023 = $true) {
     # Schrittmodus: nur dbx-Hashlisten fuer x64, ohne SVN- und PCA-2011-Sperren
     $r = $RelPath.ToLower()
     if ($r -notmatch 'x64|amd64|x86_64' -and $r -match 'ia32|x86|arm|aarch64') { return 'andere Prozessorarchitektur' }
     if ($p.Name -match 'SVN') { return 'SVN-Eintrag (sperrt alte Boot-Manager-Versionen), das regelt Windows selbst' }
     $t = Get-PayloadTarget $p
     if ($t -ne 'dbx') { return "keine dbx-Datei (Ziel $t)" }
-    Get-SkipReason $p 'dbx' 0 $true
+    Get-SkipReason $p 'dbx' 0 $true $HasKek2023
 }
 
 # ================================================================ Vorpruefung
@@ -357,9 +377,14 @@ if ($DbxStepwise) {
     Info "Zusaetzliche Dateien gehoeren nach: $StepDir"
     Info "  Quelle: github.com/microsoft/secureboot_objects, Ordner PostSignedObjects/SignedByKEK2011/dbx_x64_Legacy"
     Info "  und PostSignedObjects/DBX/amd64 (beide mit dem KEK 2011 signiert). Unterordner sind erlaubt."
+    Info "  Neuere Windows-Versionen bringen die dbx nur noch mit dem KEK 2023 signiert mit (dbxupdate.bin)."
+    Info "  Ohne KEK 2023 helfen deshalb nur die KEK-2011-Fassungen."
 
     $dbxNow = (Get-SecureBootUEFI -Name dbx -ErrorAction SilentlyContinue).Bytes
     $haveH  = Get-EslHashes $dbxNow
+    $kekNow = Get-VarEsl 'KEK'
+    $hasKek23 = [bool]($kekNow.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' })
+    Info ("KEK 2023 eingetragen: {0} (Dateien, die nur mit dem KEK 2023 signiert sind, nimmt die Firmware sonst nicht an)" -f $(if ($hasKek23) { 'ja' } else { 'nein' }))
     Info ("dbx jetzt: {0} Hashes, {1} Bytes" -f $haveH.Count, $(if ($dbxNow) { $dbxNow.Length } else { 0 }))
 
     $items = @(); $seenC = @{}
@@ -377,7 +402,7 @@ if ($DbxStepwise) {
             $seenC[$key] = $true
             $hs = Get-EslHashes $p.Content
             $new = @($hs | Where-Object { -not $haveH.Contains($_) }).Count
-            $items += [pscustomobject]@{ Rel = $rel; P = $p; Hashes = $hs; New = $new; Size = $p.Content.Length; Why = (Get-StepSkipReason $p $rel) }
+            $items += [pscustomobject]@{ Rel = $rel; P = $p; Hashes = $hs; New = $new; Size = $p.Content.Length; Why = (Get-StepSkipReason $p $rel $hasKek23) }
         }
     }
     if ($items.Count -eq 0) {
@@ -387,10 +412,10 @@ if ($DbxStepwise) {
     }
 
     Write-Host ""
-    Info ("{0,-44} {1,-10} {2,7} {3,6} {4,6}  {5}" -f 'Datei', 'signiert', 'Bytes', 'Hashes', 'neu', 'Entscheidung')
+    Info ("{0,-44} {1,-10} {2,-4} {3,7} {4,6} {5,6}  {6}" -f 'Datei', 'signiert', 'KEK', 'Bytes', 'Hashes', 'neu', 'Entscheidung')
     foreach ($it in ($items | Sort-Object { $_.P.Time }, Size)) {
         $dec = if ($it.Why) { "nein: $($it.Why)" } elseif ($it.New -eq 0) { 'nein: alles schon enthalten' } else { 'ja' }
-        Info ("{0,-44} {1,-10} {2,7} {3,6} {4,6}  {5}" -f $(if ($it.Rel.Length -gt 44) { '...' + $it.Rel.Substring($it.Rel.Length - 41) } else { $it.Rel }), $it.P.Time.Substring(0, 10), $it.Size, $it.Hashes.Count, $it.New, $dec)
+        Info ("{0,-44} {1,-10} {2,-4} {3,7} {4,6} {5,6}  {6}" -f $(if ($it.Rel.Length -gt 44) { '...' + $it.Rel.Substring($it.Rel.Length - 41) } else { $it.Rel }), $it.P.Time.Substring(0, 10), $it.P.SignedBy, $it.Size, $it.Hashes.Count, $it.New, $dec)
     }
     $todo = @($items | Where-Object { -not $_.Why -and $_.New -gt 0 } | Sort-Object { $_.P.Time }, Size)
     if ($todo.Count -eq 0) { Write-Host ""; Ok "Nichts zu tun: die dbx enthaelt bereits alle Hashes der verwendbaren Dateien."; Finish }
@@ -477,6 +502,7 @@ $kek = Get-VarEsl 'KEK'
 $dbx = Get-VarEsl 'dbx'
 $have = @{}
 foreach ($c in @($db.Certs) + @($kek.Certs)) { if ($c) { $have[$c.Thumbprint] = $true } }
+$hasKek23 = [bool]($kek.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' })
 
 # ================================================================ Dateien analysieren
 Section "Gefundene, von Microsoft signierte Update-Dateien"
@@ -496,11 +522,11 @@ foreach ($f in Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction 
     Info ("Datei:      {0}" -f $p.Name)
     Info ("Inhalt:     {0}" -f $what)
     Info ("Ziel:       {0}" -f $target)
-    Info ("Signiert:   {0}  ({1})" -f $signer, $p.Time)
+    Info ("Signiert:   {0}  ({1}), Kette: KEK {2}" -f $signer, $p.Time, $p.SignedBy)
 
     $certKey = (@($p.Certs | ForEach-Object { $_.Thumbprint }) | Sort-Object) -join ','
 
-    $skip = Get-SkipReason $p $target $missing.Count ([bool]$IncludeDbx)
+    $skip = Get-SkipReason $p $target $missing.Count ([bool]$IncludeDbx) $hasKek23
     if (-not $skip -and $target -ne 'dbx' -and $planned.ContainsKey($certKey)) {
         $planned[$certKey].Payloads += $p
         Info "-> Ersatzdatei (wird probiert, falls die erste abgelehnt wird)"
@@ -524,7 +550,7 @@ foreach ($f in Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction 
     }
 }
 $plan = @($plan | Sort-Object Order)
-# Praxis: DBUpdate1P2023.bin wurde von mehreren Firmwares abgelehnt, dbupdate2024.bin angenommen -> 1P-Dateien zuletzt probieren
+# Praxis: DBUpdate1P2023.bin ist mit dem KEK 2023 signiert und wird ohne diesen abgelehnt -> 1P-Dateien zuletzt probieren
 foreach ($s in $plan) { $s.Payloads = @($s.Payloads | Sort-Object { if ($_.Name -match '1P') { 1 } else { 0 } }) }
 
 if ($plan.Count -eq 0) {

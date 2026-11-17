@@ -224,7 +224,7 @@ function Get-ClearHint {
     $cs = Get-CimInstance Win32_ComputerSystem; $m = "$($cs.Manufacturer)"; $mo = "$($cs.Model)"
     if ($mo -match 'Virtual Machine' -and $m -match 'Microsoft') { return 'Hyper-V: nicht moeglich (Vorlage verwenden)' }
     if ($m -match 'VMware')      { return 'VMware: nicht noetig/anders (NVRAM)' }
-    if ($m -match 'HP|Hewlett')  { return 'F10 -> Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> "Clear Secure Boot Keys" (Bestaetigungscode eingeben). Gibt es dort "Key Ownership", vorher auf "Custom Keys" stellen: mit "HP Keys" laden manche Firmwares (z.B. Compaq Pro 6300) nach dem Loeschen wieder die Werksschluessel statt in den Setup Mode zu gehen - siehe LIESMICH.' }
+    if ($m -match 'HP|Hewlett')  { return 'F10 -> Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> "Clear Secure Boot Keys" (Bestaetigungscode eingeben). ACHTUNG Compaq Pro 6300 und aehnlich alte HP: Mit Key Ownership "HP Keys" laden sie nach dem Loeschen wieder die Werksschluessel, mit "Custom Keys" erreichen sie zwar den Setup Mode, nehmen danach aber den HP-PK nicht an - Secure Boot laesst sich dann nicht mehr einschalten. Dort 6_ nicht benutzen, siehe LIESMICH.' }
     if ($m -match 'Google' -or "$((Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion)" -match 'MrChromebox') { return 'Esc beim Start -> Device Manager -> Secure Boot Configuration -> Secure Boot Mode "Custom" -> Custom Secure Boot Options -> PK Options -> Delete PK' }
     if ($m -match 'Dell')        { return 'F2 -> Secure Boot -> Expert Key Management -> Custom Mode an -> "Delete All Keys"' }
     if ($m -match 'Lenovo')      { return 'F1/F2 -> Security -> Secure Boot -> "Reset to Setup Mode" bzw. "Clear All Secure Boot Keys"' }
@@ -339,9 +339,9 @@ if ($setupMode -ne 1) {
             Bad "Die Firmware hat beim 'Schluessel loeschen' offenbar die WERKSSCHLUESSEL geladen statt in den Setup Mode zu gehen."
             Info "Auf diesem Geraet funktioniert der Setup-Mode-Weg so NICHT."
             if ($model -match 'HP|Hewlett') {
-                Info "HP: Gibt es im Firmware-Setup unter Secure Boot Configuration die Einstellung 'Key Ownership',"
-                Info "    vor dem naechsten Versuch auf 'Custom Keys' statt 'HP Keys' stellen. Mit 'HP Keys' laedt die"
-                Info "    Firmware nach dem Loeschen moeglicherweise immer wieder ihre Werksschluessel."
+                Info "HP: Mit Key Ownership 'Custom Keys' kommt z.B. der Compaq Pro 6300 zwar in den Setup Mode,"
+                Info "    nimmt danach aber den HP-PK nicht an. Secure Boot laesst sich dann nicht einschalten."
+                Info "    Auf solchen Geraeten ist der Setup-Mode-Weg mit dem Original-PK nicht moeglich."
             }
             Info "Wiederherstellen:  (falls Windows nicht startet: Secure Boot im Firmware-Setup AUS)"
             Info "  1. 5_Manuell_mit_dbx.cmd   (traegt die 2023-CAs und die dbx wieder ein)"
@@ -532,6 +532,8 @@ foreach ($s in $steps) {
 if (-not $critOk) {
     Bad "db oder KEK konnten nicht geschrieben werden - PK wird NICHT geschrieben."
     Info "Die Firmware bleibt im Setup Mode (Windows startet, Secure Boot wird nicht erzwungen)."
+    Info "Stehen KEK und db schon aus einem frueheren Lauf drin (Setup Mode ohne PK), lassen manche Firmwares"
+    Info "sie nicht ueberschreiben: dann im Firmware-Setup die Schluessel erneut loeschen und das Skript wiederholen."
     Info "Optionen: Skript erneut ausfuehren, oder im Firmware-Setup Schluessel auf Werkseinstellung"
     Info "+ Secure Boot aus, booten, 4_Manuell_einspielen.cmd, Secure Boot wieder an."
     Finish
@@ -551,6 +553,11 @@ if ($r -and $setupMode -eq 0) {
     Info "den hat nur der Hersteller. Das laesst sich von Windows aus NICHT loesen, erneutes Ausfuehren hilft nicht."
     Info ""
     Info "Was jetzt passiert, haengt von der Firmware ab:"
+    Info " - Manche (z.B. HP Compaq Pro 6300 mit Key Ownership 'Custom Keys') bleiben ohne PK im Setup Mode."
+    Info "   KEK, db und dbx sind dann neu, aber Secure Boot laesst sich NICHT einschalten. Zurueck zum sicheren Stand:"
+    Info "   Firmware-Setup: Secure Boot AUS, Key Ownership 'HP Keys' (laedt die Werksschluessel), Windows starten,"
+    Info "   5_Manuell_mit_dbx.cmd, dann Secure Boot wieder AN. Ohne 'Secure Boot AUS' meldet der PC 'invalid signature',"
+    Info "   weil die Werks-db die Windows UEFI CA 2023 nicht kennt."
     Info " - Manche (z.B. HP ProDesk 400 G5, EliteBook 840 G3) tragen beim naechsten Start ihren Werks-PK"
     Info "   selbst wieder ein. KEK und db bleiben dabei erhalten, die dbx faellt auf Werkseinstellung zurueck."
     Info "   Dann: 5_Manuell_mit_dbx.cmd (dbx), 2_Update_anstossen.cmd (Windows uebernimmt den Stand, 1808),"

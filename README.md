@@ -156,8 +156,13 @@ Skript `SecureBootManual.ps1`
 Den KEK kann dieser Weg nicht eintragen, denn dafür bräuchte es eine Signatur mit dem PK des
 Herstellers.
 
-Manche Firmwares lehnen das Anhängen an die dbx mit `0xC0000022` ab. Das ist harmlos, die dbx
-bleibt dann einfach, wie sie war. Den nächsten Versuch macht `8_dbx_schrittweise.cmd`.
+Jede Datei ist mit einem Microsoft-KEK signiert, entweder mit dem alten KEK 2011 oder mit dem
+neuen KEK 2023. Die Firmware nimmt sie nur an, wenn dieser KEK bei ihr eingetragen ist. Das Skript
+zeigt die Kette zu jeder Datei an und überspringt Dateien, die mit dem KEK 2023 signiert sind,
+solange er auf dem PC fehlt. Das betrifft vor allem die Sperrliste: Neuere Windows-Versionen
+bringen `dbxupdate.bin` nur noch mit dem KEK 2023 signiert mit. Auf einem PC ohne KEK 2023 muss
+die Firmware sie mit `0xC0000022` ablehnen. Die mit dem KEK 2011 signierte Fassung spielt
+`8_dbx_schrittweise.cmd` ein.
 
 ### `6_Schluessel_neu_aufbauen.cmd`
 
@@ -182,15 +187,22 @@ Wie die Firmware mit dem zurückgeschriebenen PK umgeht, ist je nach Hersteller 
 |---|---|---|
 | nimmt den PK an, User Mode erst nach dem Neustart | Lenovo ThinkCentre M93 | alles bleibt erhalten |
 | lehnt den PK ab, trägt ihren Werks-PK beim Neustart selbst ein | HP ProDesk 400 G5, EliteBook 840 G3 | KEK und db bleiben, die dbx fällt zurück und wird mit `5_` nachgezogen |
-| lädt beim Löschen die Werksschlüssel statt in den Setup Mode zu gehen | HP Compaq Pro 6300 | so nicht möglich, siehe Hinweis zu „Key Ownership“ |
+| lädt beim Löschen die Werksschlüssel (Key Ownership „HP Keys“) oder lehnt den PK ab und bleibt ohne PK im Setup Mode („Custom Keys“) | HP Compaq Pro 6300 | nicht möglich, siehe unten |
 
-**HP und „Key Ownership“:** Manche HP-Firmwares haben unter Secure Boot Configuration die
-Einstellung „Key Ownership“ mit den Werten „HP Keys“ und „Custom Keys“. Steht sie auf HP Keys, lädt
-die Firmware nach „Clear Secure Boot Keys“ möglicherweise beim nächsten Start wieder ihre
-Werksschlüssel, statt in den Setup Mode zu gehen. Vor einem erneuten Versuch mit `6_` deshalb
-nachsehen, ob es die Einstellung gibt, und sie auf Custom Keys stellen. Ob die Firmware danach den
-zurückgeschriebenen HP-PK annimmt, ist nicht getestet. Das Skript erkennt nach dem Neustart, wenn
-doch wieder die Werksschlüssel geladen wurden, und hält an.
+**HP und „Key Ownership“:** Ältere HP-Firmwares haben unter Secure Boot Configuration die
+Einstellung „Key Ownership“ mit den Werten „HP Keys“ und „Custom Keys“. Auf dem Compaq Pro 6300 gilt:
+
+- Mit HP Keys lädt „Clear Secure Boot Keys“ beim nächsten Start wieder die Werksschlüssel. Einen
+  Setup Mode gibt es so nicht.
+- Mit Custom Keys erreicht die Firmware den Setup Mode, und `6_` kann KEK (mit KEK 2023), db und dbx
+  schreiben. Den Original-PK von HP nimmt sie danach aber nicht an (`0xC0000022`). Ohne PK lässt
+  sich Secure Boot nicht einschalten.
+- Zurück auf HP Keys lädt sie wieder die Werksschlüssel. Deren db kennt die Windows UEFI CA 2023
+  nicht, also startet der neue Boot-Manager mit Secure Boot nur noch mit „invalid signature“.
+
+Rückweg in diesem Fall: Secure Boot aus, Key Ownership auf HP Keys, Windows starten,
+`5_Manuell_mit_dbx.cmd`, Secure Boot wieder an. `1_Pruefen.cmd` erkennt den Zustand „Setup Mode
+ohne PK“ und nennt diesen Weg.
 
 Die dbx übernimmt das Skript ausschließlich als saubere SHA256-Hashlisten. Vor dem Schreiben prüft
 es alle Daten auf ein gültiges Format.
@@ -216,8 +228,10 @@ eingetragen hat. Eine beschädigte dbx in der Sicherung wird vor dem Schreiben b
 
 ### `8_dbx_schrittweise.cmd`
 
-Für Firmwares, die die aktuelle Sperrliste von Windows mit `0xC0000022` ablehnen. Dafür gibt es
-zwei naheliegende Erklärungen, und der Starter prüft beide:
+Für PCs, deren Firmware die aktuelle Sperrliste von Windows mit `0xC0000022` ablehnt. Der
+häufigste Grund ist der signierende KEK (siehe oben): Fehlt der KEK 2023, braucht es die mit dem
+KEK 2011 signierte Fassung, und die bringt Windows nicht mehr mit. Lehnt die Firmware auch diese ab,
+gibt es zwei weitere Erklärungen, und der Starter prüft beide:
 
 | Vermutung | Hintergrund |
 |---|---|
@@ -228,9 +242,10 @@ Das Skript sammelt alle dbx-Dateien aus dem Ordner `dbx_schrittweise` neben den 
 Unterordnern) und aus `SecureBootUpdates`. Es
 
 1. sortiert aus, was nicht passt: andere Prozessorarchitekturen (x86, ARM), SVN-Einträge, die
-   PCA-2011-Sperre, Dateien mit unsauberem Format und Dateien, deren Hashes schon alle in der dbx
-   stehen,
-2. zeigt eine Tabelle mit Größe, Datum, Anzahl Hashes und wie viele davon neu wären,
+   PCA-2011-Sperre, Dateien mit unsauberem Format, mit dem KEK 2023 signierte Dateien, solange er
+   fehlt, und Dateien, deren Hashes schon alle in der dbx stehen,
+2. zeigt eine Tabelle mit Signaturdatum, signierendem KEK, Größe, Anzahl Hashes und wie viele
+   davon neu wären,
 3. schreibt nach einem `JA` eine Datei nach der anderen, die älteste zuerst und bei gleichem Datum
    die kleinste, und macht nach einer Ablehnung mit der nächsten weiter. Die Reihenfolge nach Datum
    sorgt dafür, dass eine angenommene Datei die nächste nicht wegen des Zeitstempels blockiert.
@@ -335,7 +350,7 @@ Stand 17.11.2026, Skriptversion 1.3.
 | Lenovo ThinkCentre M93 (10A4) | Schnellstart, dann `6_` | alles auf 2023; die dbx ging erst über `6_` |
 | Lenovo ThinkCentre M93p (10AA) | Schnellstart, dann `6_` | alles auf 2023 (siehe unten) |
 | Chromebox Google Teemo (MrChromebox) | nur `2_` | alles auf 2023; die Firmware bringt die 2023-Zertifikate schon mit, ein Reset ist hier ungefährlich |
-| HP Compaq Pro 6300 | Schnellstart | db und Boot-Manager auf 2023; KEK und dbx bisher nicht möglich. Offen: `8_` und die Einstellung „Key Ownership“ |
+| HP Compaq Pro 6300 | Schnellstart, dann `8_` | db und Boot-Manager auf 2023. KEK nicht möglich: auch mit „Custom Keys“ lehnt die Firmware den HP-PK ab. Die dbx scheiterte, weil Windows sie nur mit dem KEK 2023 signiert mitbringt; die KEK-2011-Fassung über `8_` ist der nächste Versuch. |
 | 10ZiG Thin Client | | kein Secure Boot, nicht betroffen |
 
 **Fehler in Version 1.1 (behoben in 1.2):** Auf dem M93p mit Windows-Build 19044.7725 lagen die

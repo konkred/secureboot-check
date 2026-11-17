@@ -178,8 +178,13 @@ Skript SecureBootManual.ps1
 Den KEK kann dieser Weg nicht eintragen, denn dafuer braeuchte es eine Signatur mit dem PK des
 Herstellers.
 
-Manche Firmwares lehnen das Anhaengen an die dbx mit 0xC0000022 ab. Das ist harmlos, die dbx
-bleibt dann einfach, wie sie war. Den naechsten Versuch macht 8_dbx_schrittweise.cmd.
+Jede Datei ist mit einem Microsoft-KEK signiert, entweder mit dem alten KEK 2011 oder mit dem
+neuen KEK 2023. Die Firmware nimmt sie nur an, wenn dieser KEK bei ihr eingetragen ist. Das Skript
+zeigt die Kette zu jeder Datei an und ueberspringt Dateien, die mit dem KEK 2023 signiert sind,
+solange er auf dem PC fehlt. Das betrifft vor allem die Sperrliste: Neuere Windows-Versionen
+bringen dbxupdate.bin nur noch mit dem KEK 2023 signiert mit. Auf einem PC ohne KEK 2023 muss
+die Firmware sie mit 0xC0000022 ablehnen. Die mit dem KEK 2011 signierte Fassung spielt
+8_dbx_schrittweise.cmd ein.
 
 6_Schluessel_neu_aufbauen.cmd
 -----------------------------
@@ -207,17 +212,24 @@ Wie die Firmware mit dem zurueckgeschriebenen PK umgeht, ist je nach Hersteller 
   lehnt den PK ab, traegt ihren Werks-PK beim Neustart selbst ein
       Beispiel: HP ProDesk 400 G5, EliteBook 840 G3
       Folge: KEK und db bleiben, die dbx faellt zurueck und wird mit 5_ nachgezogen
-  laedt beim Loeschen die Werksschluessel statt in den Setup Mode zu gehen
+  laedt beim Loeschen die Werksschluessel (Key Ownership "HP Keys") oder lehnt den PK ab und bleibt ohne PK im Setup Mode ("Custom Keys")
       Beispiel: HP Compaq Pro 6300
-      Folge: so nicht moeglich, siehe Hinweis zu "Key Ownership"
+      Folge: nicht moeglich, siehe unten
 
-HP und "Key Ownership": Manche HP-Firmwares haben unter Secure Boot Configuration die
-Einstellung "Key Ownership" mit den Werten "HP Keys" und "Custom Keys". Steht sie auf HP Keys, laedt
-die Firmware nach "Clear Secure Boot Keys" moeglicherweise beim naechsten Start wieder ihre
-Werksschluessel, statt in den Setup Mode zu gehen. Vor einem erneuten Versuch mit 6_ deshalb
-nachsehen, ob es die Einstellung gibt, und sie auf Custom Keys stellen. Ob die Firmware danach den
-zurueckgeschriebenen HP-PK annimmt, ist nicht getestet. Das Skript erkennt nach dem Neustart, wenn
-doch wieder die Werksschluessel geladen wurden, und haelt an.
+HP und "Key Ownership": Aeltere HP-Firmwares haben unter Secure Boot Configuration die
+Einstellung "Key Ownership" mit den Werten "HP Keys" und "Custom Keys". Auf dem Compaq Pro 6300 gilt:
+
+- Mit HP Keys laedt "Clear Secure Boot Keys" beim naechsten Start wieder die Werksschluessel. Einen
+  Setup Mode gibt es so nicht.
+- Mit Custom Keys erreicht die Firmware den Setup Mode, und 6_ kann KEK (mit KEK 2023), db und dbx
+  schreiben. Den Original-PK von HP nimmt sie danach aber nicht an (0xC0000022). Ohne PK laesst
+  sich Secure Boot nicht einschalten.
+- Zurueck auf HP Keys laedt sie wieder die Werksschluessel. Deren db kennt die Windows UEFI CA 2023
+  nicht, also startet der neue Boot-Manager mit Secure Boot nur noch mit "invalid signature".
+
+Rueckweg in diesem Fall: Secure Boot aus, Key Ownership auf HP Keys, Windows starten,
+5_Manuell_mit_dbx.cmd, Secure Boot wieder an. 1_Pruefen.cmd erkennt den Zustand "Setup Mode
+ohne PK" und nennt diesen Weg.
 
 Die dbx uebernimmt das Skript ausschliesslich als saubere SHA256-Hashlisten. Vor dem Schreiben prueft
 es alle Daten auf ein gueltiges Format.
@@ -245,8 +257,10 @@ eingetragen hat. Eine beschaedigte dbx in der Sicherung wird vor dem Schreiben b
 8_dbx_schrittweise.cmd
 ----------------------
 
-Fuer Firmwares, die die aktuelle Sperrliste von Windows mit 0xC0000022 ablehnen. Dafuer gibt es
-zwei naheliegende Erklaerungen, und der Starter prueft beide:
+Fuer PCs, deren Firmware die aktuelle Sperrliste von Windows mit 0xC0000022 ablehnt. Der
+haeufigste Grund ist der signierende KEK (siehe oben): Fehlt der KEK 2023, braucht es die mit dem
+KEK 2011 signierte Fassung, und die bringt Windows nicht mehr mit. Lehnt die Firmware auch diese ab,
+gibt es zwei weitere Erklaerungen, und der Starter prueft beide:
 
   Groesse       Die Liste ist inzwischen gut 24 KB gross. Aeltere Firmwares haben teils eine
                 Grenze pro Schreibvorgang oder wenig freien Variablenspeicher. Frueher hat
@@ -259,9 +273,10 @@ Das Skript sammelt alle dbx-Dateien aus dem Ordner dbx_schrittweise neben den Sk
 Unterordnern) und aus SecureBootUpdates. Es
 
 1. sortiert aus, was nicht passt: andere Prozessorarchitekturen (x86, ARM), SVN-Eintraege, die
-   PCA-2011-Sperre, Dateien mit unsauberem Format und Dateien, deren Hashes schon alle in der dbx
-   stehen,
-2. zeigt eine Tabelle mit Groesse, Datum, Anzahl Hashes und wie viele davon neu waeren,
+   PCA-2011-Sperre, Dateien mit unsauberem Format, mit dem KEK 2023 signierte Dateien, solange er
+   fehlt, und Dateien, deren Hashes schon alle in der dbx stehen,
+2. zeigt eine Tabelle mit Signaturdatum, signierendem KEK, Groesse, Anzahl Hashes und wie viele
+   davon neu waeren,
 3. schreibt nach einem JA eine Datei nach der anderen, die aelteste zuerst und bei gleichem Datum
    die kleinste, und macht nach einer Ablehnung mit der naechsten weiter. Die Reihenfolge nach Datum
    sorgt dafuer, dass eine angenommene Datei die naechste nicht wegen des Zeitstempels blockiert.
@@ -380,9 +395,11 @@ Stand 17.11.2026, Skriptversion 1.3.
       Ergebnis: alles auf 2023; die Firmware bringt die 2023-Zertifikate schon mit, ein
                 Reset ist hier ungefaehrlich
   HP Compaq Pro 6300
-      Weg: Schnellstart
-      Ergebnis: db und Boot-Manager auf 2023; KEK und dbx bisher nicht moeglich. Offen: 8_
-                und die Einstellung "Key Ownership"
+      Weg: Schnellstart, dann 8_
+      Ergebnis: db und Boot-Manager auf 2023. KEK nicht moeglich: auch mit "Custom Keys"
+                lehnt die Firmware den HP-PK ab. Die dbx scheiterte, weil Windows sie nur
+                mit dem KEK 2023 signiert mitbringt; die KEK-2011-Fassung ueber 8_ ist der
+                naechste Versuch.
   10ZiG Thin Client
       Ergebnis: kein Secure Boot, nicht betroffen
 
