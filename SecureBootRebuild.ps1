@@ -182,6 +182,32 @@ function Read-AuthPayload([string]$Path) {
     [pscustomobject]@{ Name = Split-Path -Leaf $Path; Content = $content; Certs = $esl.Certs; Hashes = $esl.Hashes; Other = $esl.Other; Valid = $esl.Valid }
 }
 
+function Get-DedupDbx([byte[]]$b) {
+    # Fasst alle SHA256-Eintraege zu EINER Liste zusammen, jeder Hash nur einmal (spart Firmware-Speicher)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $ms = New-Object IO.MemoryStream; $n = 0; $o = 0
+    while ($b -and $o + 28 -le $b.Length) {
+        $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
+        $listSize = [BitConverter]::ToUInt32($b, $o + 16)
+        $hdrSize  = [BitConverter]::ToUInt32($b, $o + 20)
+        $sigSize  = [BitConverter]::ToUInt32($b, $o + 24)
+        if ($listSize -lt 28 -or $sigSize -lt 16 -or ($o + $listSize) -gt $b.Length) { break }
+        if ($type -eq $Sha256Guid -and $sigSize -eq 48) {
+            $p = $o + 28 + $hdrSize
+            while ($p + 48 -le $o + $listSize) {
+                if ($seen.Add([BitConverter]::ToString($b, $p + 16, 32))) { $ms.Write($b, $p, 48); $n++ }
+                $p += 48
+            }
+        }
+        $o += $listSize
+    }
+    if ($n -eq 0) { return ,([byte[]]@()) }
+    $hdr = New-Object IO.MemoryStream; $w = New-Object IO.BinaryWriter $hdr
+    $w.Write($Sha256Guid.ToByteArray()); $w.Write([UInt32](28 + 48 * $n)); $w.Write([UInt32]0); $w.Write([UInt32]48)
+    $w.Write($ms.ToArray()); $w.Flush()
+    ,$hdr.ToArray()
+}
+
 function New-CertEsl([byte[]]$der) {
     $ms = New-Object IO.MemoryStream
     $w  = New-Object IO.BinaryWriter $ms
@@ -352,6 +378,14 @@ if ($setupMode -ne 1) {
     }
     $pkE = Parse-Esl $pk; $kekE = Parse-Esl $kek; $dbE = Parse-Esl $db; $dbxE = Parse-Esl $dbx
     Info ("PK:  {0}" -f (($pkE.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', '))
+    # Geraete, auf denen der Weg nachweislich nicht funktioniert
+    if ($model -match 'Compaq Pro 6300') {
+        Bad "Auf diesem Modell funktioniert der Neuaufbau nachweislich NICHT (getestet 11/2026):"
+        Info "  Mit Key Ownership 'HP Keys' laedt die Firmware nach dem Loeschen wieder die Werksschluessel,"
+        Info "  mit 'Custom Keys' lehnt sie den HP-PK ab und Secure Boot laesst sich nicht mehr einschalten."
+        Info "  Zurueck geht es dann nur mit Secure Boot AUS, 'HP Keys', 5_Manuell_mit_dbx.cmd."
+        if (-not (Confirm-JA "Trotzdem vorbereiten?")) { Info "Abgebrochen, nichts geaendert."; Finish }
+    }
     if ($pkE.Certs | Where-Object { $_.Subject -match 'DO NOT TRUST|DO NOT SHIP' }) {
         Bad "PK ist ein Testschluessel (PKfail). Den wuerde dieses Skript 1:1 zurueckschreiben - Abbruch."
         Finish
@@ -401,7 +435,8 @@ if ($setupMode -ne 1) {
         Info ("dbx + {0} Hashes  [{1}]" -f $p.Hashes, $p.Name)
         $dbxAdds += ,$p.Content
     }
-    $newDbx = Get-CleanDbx (Join-Bytes (@(,$dbx) + $dbxAdds))
+    $newDbx = Get-DedupDbx (Get-CleanDbx (Join-Bytes (@(,$dbx) + $dbxAdds)))
+    $oldUnique = (Parse-Esl (Get-DedupDbx (Get-CleanDbx $dbx))).Hashes
     foreach ($chk in @(@('KEK',$newKek), @('db',$newDb), @('dbx',$newDbx))) {
         if (-not (Parse-Esl $chk[1]).Valid) { Bad ("Neuer {0}-Inhalt ist fehlerhaft - Abbruch, nichts gespeichert." -f $chk[0]); Finish }
     }
@@ -411,13 +446,13 @@ if ($setupMode -ne 1) {
     Section "Neuer Inhalt (wird in Phase 2 geschrieben)"
     Info "KEK: $((($nk.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', '))"
     Info "db:  $((($nd.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', '))"
-    Info ("dbx: {0} Hashes (vorher {1})" -f $nx.Hashes, $dbxE.Hashes)
+    Info ("dbx: {0} Hashes, davon {1} neu (vorher {2} Eintraege, doppelte werden zusammengefasst)" -f $nx.Hashes, ($nx.Hashes - $oldUnique), $dbxE.Hashes)
     Info "PK:  unveraendert"
 
     if (-not ($nd.Certs | Where-Object { $_.Subject -match 'Windows UEFI CA 2023' })) { Warn "db haette keine Windows UEFI CA 2023 - pruefen!" }
     if (-not ($nd.Certs | Where-Object { $_.Subject -match 'Windows Production PCA 2011' })) { Warn "db haette keine PCA 2011 - aeltere Boot-Medien wuerden nicht starten" }
 
-    if (-not $kekAdd -and $dbAdds.Count -eq 0 -and $dbxAdds.Count -eq 0) { Ok "Nichts zu ergaenzen."; Finish }
+    if (-not $kekAdd -and $dbAdds.Count -eq 0 -and $nx.Hashes -le $oldUnique) { Ok "Nichts zu ergaenzen."; Finish }
 
     Write-Host ""
     if (-not (Confirm-JA "Rebuild-Daten speichern und Phase 1 abschliessen?")) { Info "Abgebrochen."; Finish }
@@ -479,7 +514,7 @@ if (Test-Path $dbxPath) {
     $dbxRaw = [IO.File]::ReadAllBytes($dbxPath)
     # Beim Neuaufbau bleiben nur Hash-Sperren; beim Zurueckspielen wird nur bereinigt, wenn die Datei beschaedigt ist
     if (-not $Restore -or -not (Parse-Esl $dbxRaw).Valid) {
-        $dbxOk = Get-CleanDbx $dbxRaw
+        $dbxOk = if ($Restore) { Get-CleanDbx $dbxRaw } else { Get-DedupDbx (Get-CleanDbx $dbxRaw) }
         if ($dbxOk.Length -ne $dbxRaw.Length) {
             Warn ("dbx.esl enthielt fehlerhafte/unerwuenschte Teile ({0} -> {1} Bytes) - bereinigt, nur Hash-Sperren bleiben." -f $dbxRaw.Length, $dbxOk.Length)
             [IO.File]::WriteAllBytes($dbxPath, $dbxOk)

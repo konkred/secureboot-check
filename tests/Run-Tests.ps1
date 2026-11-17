@@ -187,9 +187,12 @@ Check "Kaputte Datei abgelehnt" ([bool](Get-StepSkipReason (P 'dbx_garbage.bin')
 
 # ------------------------------------------------------------------ 2b. Rebuild (6_/7_)
 Head "SecureBootRebuild.ps1: Parser und dbx-Entscheidung"
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootRebuild.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Unwrap-Content','Read-AuthPayload','Get-DbxSkipReason'))) { . ([scriptblock]::Create($t)) }
+foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootRebuild.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-DedupDbx','Unwrap-Content','Read-AuthPayload','Get-DbxSkipReason'))) { . ([scriptblock]::Create($t)) }
 Check "Muell erkannt" (-not (Parse-Esl $garbage).Valid)
 Check "Get-CleanDbx entfernt den Muell" ((Get-CleanDbx $garbage).Length -eq $hashEsl.Length)
+$dd = Get-DedupDbx (Cat-Bytes @($hashEsl, $hashEsl, (New-HashEsl 2)))
+Check "Get-DedupDbx: doppelte Hashes zusammengefasst" ((Parse-Esl $dd).Hashes -eq 7 -and (Parse-Esl $dd).Valid)
+Check "Get-DedupDbx: leere Eingabe bleibt leer" ((Get-DedupDbx ([byte[]]@())).Length -eq 0)
 Check "Normale dbx-Datei: erlaubt" ($null -eq (Get-DbxSkipReason (P 'dbxupdate.bin')))
 Check "Aelteres Format: erlaubt" ($null -eq (Get-DbxSkipReason (P 'dbxupdate_wrapped.bin')))
 Check "Kaputte Datei: abgelehnt" ([bool](Get-DbxSkipReason (P 'dbx_garbage.bin')))
@@ -204,6 +207,8 @@ function Get-SecureBootUEFI { param([string]$Name, $ErrorAction) if (-not $scrip
 foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootCheck.ps1') @('Get-CN','Get-EfiSignatureList','Get-ChainKind'))) { . ([scriptblock]::Create($t)) }
 $script:MockVars['dbx'] = $hashEsl;  $l = Get-EfiSignatureList 'dbx'
 Check "Variable sauber: Valid" ($l.Valid -and $l.Hashes -eq 5 -and $l.GoodBytes -eq $hashEsl.Length)
+$script:MockVars['dbx'] = (Cat-Bytes @($hashEsl, $hashEsl)); $l = Get-EfiSignatureList 'dbx'
+Check "Doppelte Hashes erkannt" ($l.Hashes -eq 10 -and $l.Unique -eq 5)
 $script:MockVars['dbx'] = $garbage;  $l = Get-EfiSignatureList 'dbx'
 Check "Variable beschaedigt: erkannt, sauberer Teil benannt" (-not $l.Valid -and $l.GoodBytes -eq $hashEsl.Length)
 Check "Fehlende Variable: null" ($null -eq (Get-EfiSignatureList 'KEK'))

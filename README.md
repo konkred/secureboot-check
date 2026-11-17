@@ -204,7 +204,7 @@ Rückweg in diesem Fall: Secure Boot aus, Key Ownership auf HP Keys, Windows sta
 `5_Manuell_mit_dbx.cmd`, Secure Boot wieder an. `1_Pruefen.cmd` erkennt den Zustand „Setup Mode
 ohne PK“ und nennt diesen Weg.
 
-Die dbx übernimmt das Skript ausschließlich als saubere SHA256-Hashlisten. Vor dem Schreiben prüft
+Die dbx übernimmt das Skript ausschließlich als saubere SHA256-Hashlisten, jeden Hash nur einmal. Vor dem Schreiben prüft
 es alle Daten auf ein gültiges Format.
 
 ### `7_Sicherung_zurueckspielen.cmd`
@@ -350,7 +350,7 @@ Stand 17.11.2026, Skriptversion 1.3.
 | Lenovo ThinkCentre M93 (10A4) | Schnellstart, dann `6_` | alles auf 2023; die dbx ging erst über `6_` |
 | Lenovo ThinkCentre M93p (10AA) | Schnellstart, dann `6_` | alles auf 2023 (siehe unten) |
 | Chromebox Google Teemo (MrChromebox) | nur `2_` | alles auf 2023; die Firmware bringt die 2023-Zertifikate schon mit, ein Reset ist hier ungefährlich |
-| HP Compaq Pro 6300 | Schnellstart, dann `8_` | db und Boot-Manager auf 2023. KEK nicht möglich: auch mit „Custom Keys“ lehnt die Firmware den HP-PK ab. Die dbx scheiterte, weil Windows sie nur mit dem KEK 2023 signiert mitbringt; die KEK-2011-Fassung über `8_` ist der nächste Versuch. |
+| HP Compaq Pro 6300 | Schnellstart, Versuch mit `6_` und „Custom Keys“, Rückweg | db, Boot-Manager und dbx auf 2023, nur der KEK fehlt. Den HP-PK lehnt die Firmware auch mit „Custom Keys“ ab. Die volle dbx aus diesem Versuch blieb beim Rückweg auf „HP Keys“ erhalten. Die dbx-Datei von Windows ist dort nicht verwendbar, weil sie nur mit dem KEK 2023 signiert ist; `8_` mit der KEK-2011-Fassung hätte denselben Stand gebracht. `6_` warnt auf diesem Modell und verlangt ein `JA`. |
 | 10ZiG Thin Client | | kein Secure Boot, nicht betroffen |
 
 **Fehler in Version 1.1 (behoben in 1.2):** Auf dem M93p mit Windows-Build 19044.7725 lagen die

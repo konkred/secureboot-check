@@ -231,7 +231,7 @@ Rueckweg in diesem Fall: Secure Boot aus, Key Ownership auf HP Keys, Windows sta
 5_Manuell_mit_dbx.cmd, Secure Boot wieder an. 1_Pruefen.cmd erkennt den Zustand "Setup Mode
 ohne PK" und nennt diesen Weg.
 
-Die dbx uebernimmt das Skript ausschliesslich als saubere SHA256-Hashlisten. Vor dem Schreiben prueft
+Die dbx uebernimmt das Skript ausschliesslich als saubere SHA256-Hashlisten, jeden Hash nur einmal. Vor dem Schreiben prueft
 es alle Daten auf ein gueltiges Format.
 
 7_Sicherung_zurueckspielen.cmd
@@ -395,11 +395,13 @@ Stand 17.11.2026, Skriptversion 1.3.
       Ergebnis: alles auf 2023; die Firmware bringt die 2023-Zertifikate schon mit, ein
                 Reset ist hier ungefaehrlich
   HP Compaq Pro 6300
-      Weg: Schnellstart, dann 8_
-      Ergebnis: db und Boot-Manager auf 2023. KEK nicht moeglich: auch mit "Custom Keys"
-                lehnt die Firmware den HP-PK ab. Die dbx scheiterte, weil Windows sie nur
-                mit dem KEK 2023 signiert mitbringt; die KEK-2011-Fassung ueber 8_ ist der
-                naechste Versuch.
+      Weg: Schnellstart, Versuch mit 6_ und "Custom Keys", Rueckweg
+      Ergebnis: db, Boot-Manager und dbx auf 2023, nur der KEK fehlt. Den HP-PK lehnt die
+                Firmware auch mit "Custom Keys" ab. Die volle dbx aus diesem Versuch blieb
+                beim Rueckweg auf "HP Keys" erhalten. Die dbx-Datei von Windows ist dort
+                nicht verwendbar, weil sie nur mit dem KEK 2023 signiert ist; 8_ mit der
+                KEK-2011-Fassung haette denselben Stand gebracht. 6_ warnt auf diesem Modell
+                und verlangt ein JA.
   10ZiG Thin Client
       Ergebnis: kein Secure Boot, nicht betroffen
 

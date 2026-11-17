@@ -130,7 +130,8 @@ function Get-EfiSignatureList([string]$Name) {
     try { $var = Get-SecureBootUEFI -Name $Name -ErrorAction Stop } catch { return $null }
     $b = $var.Bytes
     $certs = @(); $hashCount = 0; $otherCount = 0
-    if (-not $b) { return [pscustomobject]@{Certs=@(); Hashes=0; Other=0; Valid=$true; Bytes=0} }
+    $uniq = New-Object 'System.Collections.Generic.HashSet[string]'
+    if (-not $b) { return [pscustomobject]@{Certs=@(); Hashes=0; Unique=0; Other=0; Valid=$true; Bytes=0; GoodBytes=0} }
     $o = 0
     while ($o + 28 -le $b.Length) {
         $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
@@ -147,14 +148,14 @@ function Get-EfiSignatureList([string]$Name) {
                     $c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,$data)
                     $certs += $c
                 } catch { $otherCount++ }
-            } elseif ($type -eq $Sha256Guid) { $hashCount++ }
+            } elseif ($type -eq $Sha256Guid) { $hashCount++; if ($sigSize -ge 48) { [void]$uniq.Add([BitConverter]::ToString($b, $p + 16, 32)) } }
             else { $otherCount++ }
             $p += $sigSize
         }
         $o += $listSize
     }
     # Valid = die Variable besteht vollstaendig aus sauberen Signaturlisten (kein unlesbarer Rest)
-    [pscustomobject]@{ Certs = $certs; Hashes = $hashCount; Other = $otherCount; Valid = ($o -eq $b.Length); Bytes = $b.Length; GoodBytes = $o }
+    [pscustomobject]@{ Certs = $certs; Hashes = $hashCount; Unique = $uniq.Count; Other = $otherCount; Valid = ($o -eq $b.Length); Bytes = $b.Length; GoodBytes = $o }
 }
 
 function Get-PeEmbeddedCerts([string]$Path) {
@@ -354,6 +355,7 @@ if ($null -ne $sbOn -and -not $noKeys) {
     $dbx = Get-EfiSignatureList 'dbx'
     if ($dbx) {
         Info ("{0} Hash-Eintraege, {1} Zertifikate" -f $dbx.Hashes, $dbx.Certs.Count)
+        if ($dbx.Unique -lt $dbx.Hashes) { Info ("davon {0} verschiedene Hashes ({1} doppelt, harmlos)" -f $dbx.Unique, ($dbx.Hashes - $dbx.Unique)) }
         if ($dbx.Other -gt 0) { Info ("{0} Eintraege anderen Typs" -f $dbx.Other) }
         Test-VarIntegrity $dbx 'dbx'
         if ($dbx.Valid) { Ok "Sperrliste ist formal in Ordnung" }
