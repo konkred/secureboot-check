@@ -40,8 +40,10 @@
 param(
     [string]$PayloadDir = "$env:SystemRoot\System32\SecureBootUpdates",
     [string]$StateDir,          # anderer Ort fuer die Rebuild-Daten (z.B. Kopie auf dem Stick)
+    [switch]$Restore,           # statt Neuaufbau: eine Sicherung aus Backups\<PC>\ zurueckschreiben (7_)
     [switch]$NoPause
 )
+$ScriptVersion = '1.3'
 
 # ---------------------------------------------------------------- Admin
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -49,6 +51,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if (-not $isAdmin) {
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-PayloadDir', "`"$PayloadDir`"")
     if ($StateDir) { $argList += @('-StateDir', "`"$StateDir`"") }
+    if ($Restore)  { $argList += '-Restore' }
     if ($NoPause)  { $argList += '-NoPause' }
     Start-Process powershell.exe -Verb RunAs -ArgumentList $argList
     exit
@@ -80,7 +83,7 @@ function Copy-ToScriptDir([string]$Path, [string]$Kind) {
     if ($sameDir -or -not (Test-Path $Path)) { return $null }
     try { $dest = Get-SubDir $scriptDir $Kind; Copy-Item -Path $Path -Destination $dest -Recurse -Force -ErrorAction Stop; $dest } catch { $null }
 }
-$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("SecureBootRebuild_{0}_{1}.txt" -f $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
+$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("SecureBootRebuild_{0}_{1}.txt" -f $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch {}
 if (-not $StateDir) {
     $StateDir = Get-SubDir $localDir 'Rebuild'
@@ -205,6 +208,15 @@ function Find-CertInBlob([byte[]]$b, [string]$pattern) {
     $null
 }
 
+function Get-DbxSkipReason($p) {
+    # $null = Hashes duerfen in die dbx, sonst der Grund fuers Ueberspringen
+    if ($p.Name -match 'DBXUpdate2024')    { return 'PCA-2011-Sperre, NIE' }
+    if (-not $p.Valid -or $p.Other -gt 0) { return 'Format nicht sauber erkannt' }
+    if ($p.Certs.Count -gt 0)             { return 'enthaelt Zertifikate, z.B. PCA-2011-Sperre' }
+    if ($p.Hashes -eq 0)                  { return 'keine Hashes' }
+    $null
+}
+
 function Get-VarBytes([string]$Name) { try { (Get-SecureBootUEFI -Name $Name -ErrorAction Stop).Bytes } catch { $null } }
 function Join-Bytes { param([object[]]$Parts) $l = New-Object System.Collections.Generic.List[byte]; foreach ($p in $Parts) { if ($p) { $l.AddRange([byte[]]$p) } }; ,$l.ToArray() }
 
@@ -227,12 +239,87 @@ $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 $model = "$($cs.Manufacturer) $($cs.Model)"
 Info ("{0}, BIOS {1}" -f $model, $bios.SMBIOSBIOSVersion)
+Info ("Skript-Version {0}, Geraet {1}" -f $ScriptVersion, $deviceId)
 try { $null = Confirm-SecureBootUEFI -ErrorAction Stop } catch { Bad "Kein UEFI - Abbruch."; Finish }
 $setupMode = $null
 try { $setupMode = (Get-SecureBootUEFI -Name SetupMode).Bytes[0] } catch {}
-if ($setupMode -eq 1) { Warn "Firmware ist im SETUP MODE -> Phase 2 (Zurueckschreiben)" }
-else                  { Info "Firmware ist im User Mode -> Phase 1 (Vorbereiten)" }
+if ($Restore)              { Info ("Modus: Sicherung zurueckspielen, Firmware im {0}" -f $(if ($setupMode -eq 1) { 'SETUP MODE' } else { 'User Mode' })) }
+elseif ($setupMode -eq 1) { Warn "Firmware ist im SETUP MODE -> Phase 2 (Zurueckschreiben)" }
+else                      { Info "Firmware ist im User Mode -> Phase 1 (Vorbereiten)" }
 Info "Rebuild-Daten: $StateDir"
+
+# ================================================================ SICHERUNG ZURUECKSPIELEN (7_)
+if ($Restore) {
+    Section "Sicherung zurueckspielen"
+    # Kandidaten: Backups\<PC>\Backup_* (von 4_/5_) und Rebuild\<PC>\Original (von 6_), lokal und im Skriptordner
+    $cands = @(); $seen = @{}
+    foreach ($base in @($localDir, $scriptDir) | Select-Object -Unique) {
+        foreach ($id in @($deviceId, $env:COMPUTERNAME) | Select-Object -Unique) {
+            foreach ($kind in 'Backups','Rebuild') {
+                $r = Join-Path (Join-Path $base $kind) $id
+                if (-not (Test-Path $r)) { continue }
+                foreach ($d in @(Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Backup_*' -or $_.Name -eq 'Original' })) {
+                    $key = "$kind\$($d.Name)"
+                    if ($seen.ContainsKey($key)) { continue }
+                    $f = @{}
+                    foreach ($n in 'PK','KEK','db','dbx') {
+                        foreach ($ext in 'esl','bin') { $x = Join-Path $d.FullName "$n.$ext"; if (-not $f[$n] -and (Test-Path $x)) { $f[$n] = $x } }
+                    }
+                    if ($f['PK'] -and $f['KEK'] -and $f['db']) {
+                        $seen[$key] = $true
+                        $cands += [pscustomobject]@{ Label = $key; Dir = $d.FullName; Time = $d.LastWriteTime; Files = $f }
+                    }
+                }
+            }
+        }
+    }
+    $cands = @($cands | Sort-Object Time -Descending)
+    if ($cands.Count -eq 0) { Bad "Keine Sicherung fuer dieses Geraet gefunden (Backups\$deviceId\ bzw. Rebuild\$deviceId\Original)."; Finish }
+
+    for ($i = 0; $i -lt $cands.Count; $i++) {
+        $c = $cands[$i]
+        $k = Parse-Esl ([IO.File]::ReadAllBytes($c.Files['KEK']))
+        $d = Parse-Esl ([IO.File]::ReadAllBytes($c.Files['db']))
+        $x = if ($c.Files['dbx']) { Parse-Esl ([IO.File]::ReadAllBytes($c.Files['dbx'])) } else { $null }
+        $kek23 = [bool]($k.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' })
+        $win23 = [bool]($d.Certs | Where-Object { $_.Subject -match 'Windows UEFI CA 2023' })
+        Write-Host ""
+        Info ("[{0}]  {1}   ({2})" -f ($i + 1), $c.Label, $c.Time.ToString('yyyy-MM-dd HH:mm'))
+        Info ("      KEK: {0} Zertifikate, KEK 2023: {1}" -f $k.Certs.Count, $(if ($kek23) { 'ja' } else { 'nein' }))
+        Info ("      db:  {0} Zertifikate, Windows UEFI CA 2023: {1}" -f $d.Certs.Count, $(if ($win23) { 'ja' } else { 'nein' }))
+        Info ("      dbx: {0}" -f $(if ($x) { "$($x.Hashes) Hashes" + $(if (-not $x.Valid) { ', BESCHAEDIGT (wird bereinigt)' } else { '' }) } else { 'nicht gesichert (bleibt leer)' }))
+        if (-not $k.Valid -or -not $d.Valid) { Warn "      KEK oder db dieser Sicherung sind fehlerhaft - nicht verwendbar" }
+    }
+    Write-Host ""
+
+    if ($setupMode -ne 1) {
+        Warn "Die Firmware ist im User Mode. Zum Zurueckschreiben muss sie im Setup Mode sein:"
+        Info ("  1. Neu starten, im Firmware-Setup die Schluessel loeschen: {0}" -f (Get-ClearHint))
+        Info  "  2. Windows starten (falls noetig vorher Secure Boot aus)."
+        Info  "  3. 7_Sicherung_zurueckspielen.cmd erneut ausfuehren und die Sicherung auswaehlen."
+        Finish
+    }
+
+    $sel = Read-Host "Nummer der Sicherung, die zurueckgeschrieben werden soll (leer = Abbruch)"
+    $n = 0
+    if (-not [int]::TryParse("$sel", [ref]$n) -or $n -lt 1 -or $n -gt $cands.Count) { Info "Abgebrochen. Firmware bleibt im Setup Mode."; Finish }
+    $c = $cands[$n - 1]
+    $k = Parse-Esl ([IO.File]::ReadAllBytes($c.Files['KEK']))
+    $d = Parse-Esl ([IO.File]::ReadAllBytes($c.Files['db']))
+    if (-not $k.Valid -or -not $d.Valid) { Bad "KEK oder db dieser Sicherung sind fehlerhaft - Abbruch."; Finish }
+    if (-not ($d.Certs | Where-Object { $_.Subject -match 'Windows UEFI CA 2023' })) {
+        Warn "Diese Sicherung enthaelt die Windows UEFI CA 2023 NICHT."
+        Info "Ist der Boot-Manager schon 2023-signiert, startet Windows danach mit eingeschaltetem Secure Boot nicht."
+        Info "Dann Secure Boot ausgeschaltet lassen, Windows starten und 5_Manuell_mit_dbx.cmd ausfuehren."
+    }
+
+    # Auswahl in einen eigenen Arbeitsordner kopieren und mit Phase 2 schreiben
+    $StateDir = Join-Path (Get-SubDir $localDir 'Restore') (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    foreach ($nm in 'PK','KEK','db','dbx') { if ($c.Files[$nm]) { Copy-Item $c.Files[$nm] (Join-Path $StateDir "$nm.esl") -Force } }
+    "$env:COMPUTERNAME|$model|$($bios.SMBIOSBIOSVersion)|$($c.Time.ToString('s'))|$serial" | Set-Content (Join-Path $StateDir 'device.txt') -Encoding ASCII
+    Info ("Gewaehlt: {0}" -f $c.Dir)
+}
 
 # ================================================================ PHASE 1
 if ($setupMode -ne 1) {
@@ -304,10 +391,8 @@ if ($setupMode -ne 1) {
     # --- dbx
     $dbxAdds = @()
     foreach ($p in $payloads | Where-Object { $_.Name -match 'dbx' }) {
-        if ($p.Name -match 'DBXUpdate2024') { Info ("dbx: {0} uebersprungen (PCA-2011-Sperre, NIE)" -f $p.Name); continue }
-        if (-not $p.Valid -or $p.Other -gt 0) { Info ("dbx: {0} uebersprungen (Format nicht sauber erkannt)" -f $p.Name); continue }
-        if ($p.Hashes -eq 0) { continue }
-        if ($p.Certs.Count -gt 0) { Info ("dbx: {0} uebersprungen (enthaelt Zertifikate, z.B. PCA-2011-Sperre)" -f $p.Name); continue }
+        $why = Get-DbxSkipReason $p
+        if ($why) { if ($why -ne 'keine Hashes') { Info ("dbx: {0} uebersprungen ({1})" -f $p.Name, $why) }; continue }
         Info ("dbx + {0} Hashes  [{1}]" -f $p.Hashes, $p.Name)
         $dbxAdds += ,$p.Content
     }
@@ -385,18 +470,22 @@ foreach ($f in 'PK.esl','KEK.esl','db.esl') {
     }
 }
 $dbxPath = Join-Path $StateDir 'dbx.esl'
-$dbxRaw = [IO.File]::ReadAllBytes($dbxPath)
-$dbxOk  = Get-CleanDbx $dbxRaw
-if ($dbxOk.Length -ne $dbxRaw.Length) {
-    Warn ("dbx.esl enthielt fehlerhafte/unerwuenschte Teile ({0} -> {1} Bytes) - bereinigt, nur Hash-Sperren bleiben." -f $dbxRaw.Length, $dbxOk.Length)
-    [IO.File]::WriteAllBytes($dbxPath, $dbxOk)
+if (Test-Path $dbxPath) {
+    $dbxRaw = [IO.File]::ReadAllBytes($dbxPath)
+    # Beim Neuaufbau bleiben nur Hash-Sperren; beim Zurueckspielen wird nur bereinigt, wenn die Datei beschaedigt ist
+    if (-not $Restore -or -not (Parse-Esl $dbxRaw).Valid) {
+        $dbxOk = Get-CleanDbx $dbxRaw
+        if ($dbxOk.Length -ne $dbxRaw.Length) {
+            Warn ("dbx.esl enthielt fehlerhafte/unerwuenschte Teile ({0} -> {1} Bytes) - bereinigt, nur Hash-Sperren bleiben." -f $dbxRaw.Length, $dbxOk.Length)
+            [IO.File]::WriteAllBytes($dbxPath, $dbxOk)
+        }
+    }
+    if ((Get-Item $dbxPath).Length -eq 0) { Remove-Item $dbxPath -Force }
 }
 
-$steps = @(
-    @{ Name = 'db';  File = 'db.esl';  Critical = $true  },
-    @{ Name = 'dbx'; File = 'dbx.esl'; Critical = $false },
-    @{ Name = 'KEK'; File = 'KEK.esl'; Critical = $true  }
-)
+$steps = @(@{ Name = 'db'; File = 'db.esl'; Critical = $true })
+if (Test-Path $dbxPath) { $steps += @{ Name = 'dbx'; File = 'dbx.esl'; Critical = $false } }
+$steps += @{ Name = 'KEK'; File = 'KEK.esl'; Critical = $true }
 foreach ($s in $steps) {
     $e = Parse-Esl ([IO.File]::ReadAllBytes((Join-Path $StateDir $s.File)))
     $what = if ($e.Certs.Count) { ($e.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', ' } else { '' }

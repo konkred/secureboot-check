@@ -29,6 +29,7 @@ param(
     [switch]$Force,     # AvailableUpdates auch setzen, wenn bereits ein Wert ansteht
     [switch]$NoPause    # am Ende nicht auf Enter warten
 )
+$ScriptVersion = '1.3'
 
 # ---------------------------------------------------------------- Admin / Elevation
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -71,7 +72,7 @@ function Copy-ToScriptDir([string]$Path, [string]$Kind) {
     if ($sameDir -or -not (Test-Path $Path)) { return $null }
     try { $dest = Get-SubDir $scriptDir $Kind; Copy-Item -Path $Path -Destination $dest -Recurse -Force -ErrorAction Stop; $dest } catch { $null }
 }
-$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBoot', $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
+$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBoot', $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch { Write-Warning "Kein Protokoll moeglich: $_" }
 function Copy-LogToScriptDir {
     try { Stop-Transcript | Out-Null } catch {}
@@ -129,7 +130,7 @@ function Get-EfiSignatureList([string]$Name) {
     try { $var = Get-SecureBootUEFI -Name $Name -ErrorAction Stop } catch { return $null }
     $b = $var.Bytes
     $certs = @(); $hashCount = 0; $otherCount = 0
-    if (-not $b) { return [pscustomobject]@{Certs=@(); Hashes=0; Other=0} }
+    if (-not $b) { return [pscustomobject]@{Certs=@(); Hashes=0; Other=0; Valid=$true; Bytes=0} }
     $o = 0
     while ($o + 28 -le $b.Length) {
         $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
@@ -152,7 +153,8 @@ function Get-EfiSignatureList([string]$Name) {
         }
         $o += $listSize
     }
-    [pscustomobject]@{ Certs = $certs; Hashes = $hashCount; Other = $otherCount }
+    # Valid = die Variable besteht vollstaendig aus sauberen Signaturlisten (kein unlesbarer Rest)
+    [pscustomobject]@{ Certs = $certs; Hashes = $hashCount; Other = $otherCount; Valid = ($o -eq $b.Length); Bytes = $b.Length; GoodBytes = $o }
 }
 
 function Get-PeEmbeddedCerts([string]$Path) {
@@ -210,6 +212,17 @@ function Has-Cert($list, [string]$pattern) {
     return [bool]($list.Certs | Where-Object { $_.Subject -match $pattern })
 }
 
+function Test-VarIntegrity($list, [string]$label) {
+    # Meldet Variablen, die hinter den gueltigen Signaturlisten unlesbare Daten enthalten
+    if ($null -eq $list -or $list.Valid) { return }
+    Bad ("{0} ist BESCHAEDIGT: nur {1} von {2} Bytes sind gueltige Signaturlisten, der Rest ist unlesbar." -f $label, $list.GoodBytes, $list.Bytes)
+    if ($label -eq 'dbx') {
+        Add-Finding 'Bad' ("Die Sperrliste (dbx) ist BESCHAEDIGT. Mit aktivem Secure Boot startet der PC dann oft nur mit 'invalid signature'. Rettung: Secure Boot aus (Taste {0}), Windows starten, 6_Schluessel_neu_aufbauen.cmd ausfuehren (baut die dbx sauber neu auf) oder mit 7_Sicherung_zurueckspielen.cmd eine aeltere Sicherung zurueckschreiben." -f $vi.Key)
+    } else {
+        Add-Finding 'Bad' ("{0} ist BESCHAEDIGT. Rettung: Secure Boot aus (Taste {1}), Windows starten und mit 7_Sicherung_zurueckspielen.cmd eine Sicherung von vorher zurueckschreiben." -f $label, $vi.Key)
+    }
+}
+
 $EventInfo = @{
     1795 = 'Firmware hat beim Schreiben einer Secure-Boot-Variable einen Fehler gemeldet'
     1796 = 'Unerwarteter Fehler beim Secure-Boot-Update'
@@ -253,6 +266,7 @@ Section "1. System"
 $cs   = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 $cv   = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+Info ("Skript:    Version {0}" -f $ScriptVersion)
 Info ("PC:        {0}" -f $env:COMPUTERNAME)
 Info ("Seriennr.: {0}" -f $(if ($serial) { "$serial  (Ordner: $deviceId)" } else { "nicht auslesbar (Ordner: Hostname)" }))
 Info ("Modell:    {0} {1}" -f $cs.Manufacturer, $cs.Model)
@@ -300,6 +314,7 @@ if ($null -ne $sbOn -and -not $noKeys) {
     Section "3. Platform Key (PK)"
     $pk = Get-EfiSignatureList 'PK'
     Show-Certs $pk 'PK'
+    Test-VarIntegrity $pk 'PK'
     if ($pk -and ($pk.Certs | Where-Object { $_.Subject -match 'DO NOT TRUST|DO NOT SHIP' })) {
         Bad "PK ist ein AMI-TESTSCHLUESSEL (PKfail) - Secure Boot ist praktisch wirkungslos!"
         Add-Finding 'Bad' ("Test-PK (PKfail) erkannt: BIOS-/Firmware-Update von {0} noetig oder eigene Schluessel einspielen." -f $vi.Vendor)
@@ -309,10 +324,12 @@ if ($null -ne $sbOn -and -not $noKeys) {
     Section "4. Key Exchange Key (KEK)"
     $kek = Get-EfiSignatureList 'KEK'
     Show-Certs $kek 'KEK'
+    Test-VarIntegrity $kek 'KEK'
 
     Section "5. Erlaubte Signaturen (db)"
     $db = Get-EfiSignatureList 'db'
     Show-Certs $db 'db'
+    Test-VarIntegrity $db 'db'
 
     Section "5b. Werkseinstellungen der Firmware (dbDefault)"
     $dbDef = Get-EfiSignatureList 'dbDefault'
@@ -329,6 +346,9 @@ if ($null -ne $sbOn -and -not $noKeys) {
     $dbx = Get-EfiSignatureList 'dbx'
     if ($dbx) {
         Info ("{0} Hash-Eintraege, {1} Zertifikate" -f $dbx.Hashes, $dbx.Certs.Count)
+        if ($dbx.Other -gt 0) { Info ("{0} Eintraege anderen Typs" -f $dbx.Other) }
+        Test-VarIntegrity $dbx 'dbx'
+        if ($dbx.Valid) { Ok "Sperrliste ist formal in Ordnung" }
         if ($dbx.Hashes -lt 50 -and $dbx.Certs.Count -eq 0) {
             Warn "Sperrliste ist praktisch LEER - es wurden nie DBX-Updates eingespielt"
             Add-Finding 'Warn' 'dbx ist (fast) leer: bekannte unsichere Bootloader (z.B. BlackLotus-Luecke) sind nicht gesperrt.'
@@ -372,10 +392,69 @@ function Test-BootMgr {
     return $result
 }
 
+function Get-ChainKind($certs) {
+    # Ordnet die eingebetteten Zertifikate einer EFI-Datei grob ein
+    $certs = @($certs)
+    if ($certs.Count -eq 0) { return 'keine Signatur lesbar' }
+    $names = ($certs | ForEach-Object { $_.Subject; $_.Issuer }) -join '|'
+    if ($names -match 'Windows UEFI CA 2023')        { return 'Windows, 2023 (Windows UEFI CA 2023)' }
+    if ($names -match 'Windows Production PCA 2011') { return 'Windows, 2011 (Windows Production PCA 2011)' }
+    if ($names -match 'Microsoft UEFI CA 2023')      { return 'Fremd-Bootloader, Microsoft UEFI CA 2023' }
+    if ($names -match 'Microsoft Corporation UEFI CA 2011') { return 'Fremd-Bootloader, Microsoft UEFI CA 2011 (z.B. Linux-shim)' }
+    'unbekannt, ausgestellt von ' + (Get-CN $certs[-1].Issuer)
+}
+
+function Show-BootPaths {
+    # Ausweich-Bootloader \EFI\Boot\bootx64.efi, Ordner auf der EFI-Partition, Booteintraege der Firmware
+    $kind = $null
+    $letter = (68..90 | ForEach-Object { [char]$_ } | Where-Object { -not (Test-Path "$($_):\") } | Select-Object -Last 1)
+    if ($letter) {
+        $mp = "$($letter):"
+        try {
+            mountvol $mp /S 2>$null | Out-Null
+            $dirs = @(Get-ChildItem "$mp\EFI" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            if ($dirs.Count) { Info ("Ordner unter \EFI: {0}" -f ($dirs -join ', ')) }
+            $fb = "$mp\EFI\Boot\bootx64.efi"
+            if (Test-Path $fb) {
+                $kind = Get-ChainKind (Get-PeEmbeddedCerts $fb)
+                $txt = "Ausweich-Bootloader \EFI\Boot\bootx64.efi: $kind"
+                if ($kind -match '^Windows, 2011' -and $bootmgr2023 -eq $true) { Warn $txt } else { Info $txt }
+            } else { Info "Kein Ausweich-Bootloader \EFI\Boot\bootx64.efi vorhanden" }
+        } catch { Warn "EFI-Partition konnte nicht gelesen werden: $_" }
+        finally { mountvol $mp /D 2>$null | Out-Null }
+    }
+    try {
+        $out = @(& bcdedit.exe /enum firmware 2>$null)
+        $entries = @(); $desc = $null; $path = $null
+        foreach ($line in ($out + '')) {
+            if ($line -match '^\s*$') {
+                if ($desc) { $entries += [pscustomobject]@{ Desc = $desc; Path = $path } }
+                $desc = $null; $path = $null; continue
+            }
+            if ($line -match '^\s*(description|Beschreibung)\s+(.+)$') { $desc = $Matches[2].Trim() }
+            elseif ($line -match '^\s*(path|Pfad)\s+(.+)$')        { $path = $Matches[2].Trim() }
+        }
+        $entries = @($entries | Where-Object { $_.Path })
+        if ($entries.Count) {
+            Info "Booteintraege der Firmware (laut bcdedit /enum firmware):"
+            foreach ($e in $entries) { Info ("  {0,-30} {1}" -f $e.Desc, $e.Path) }
+        } else { Info "Booteintraege der Firmware nicht auslesbar" }
+    } catch { Info "Booteintraege der Firmware nicht auslesbar" }
+    $kind
+}
+
 # ================================================================ 7. Boot-Manager
 Section "7. Boot-Manager auf der EFI-Partition"
 $bootmgr2023 = $null
-if ($null -ne $sbOn -and -not $noKeys) { $bootmgr2023 = Test-BootMgr } else { Info "uebersprungen" }
+$fallbackKind = $null
+if ($null -ne $sbOn -and -not $noKeys) {
+    $bootmgr2023 = Test-BootMgr
+    Write-Host ""
+    $fallbackKind = Show-BootPaths
+    if ($fallbackKind -match '^Windows, 2011' -and $bootmgr2023 -eq $true) {
+        Add-Finding 'Warn' 'Der Ausweich-Bootloader \EFI\Boot\bootx64.efi ist noch mit der PCA 2011 signiert. Solange die Firmware den Windows-Boot-Manager direkt startet, spielt das keine Rolle. Startet sie den Ausweichpfad (z.B. nach Verlust der Booteintraege), braucht sie weiterhin die PCA 2011 in der db.'
+    }
+} else { Info "uebersprungen" }
 
 # ================================================================ 8. Registry
 Section "8. Windows-Servicing (Registry)"
@@ -524,5 +603,37 @@ foreach ($f in $findings) {
     switch ($f.Level) { 'Ok' { Ok $f.Text } 'Bad' { Bad $f.Text } default { Warn $f.Text } }
 }
 Write-Host ""
+
+# ================================================================ Uebersicht.csv
+function Write-Overview {
+    # Eine Zeile pro Lauf, im lokalen Ordner und im Skriptordner (z.B. Stick): Uebersicht aller Geraete
+    function YN($v) { if ($v -eq $true) { 'ja' } elseif ($v -eq $false) { 'nein' } else { '?' } }
+    $status = if ($noKeys) { 'nicht betroffen' }
+              elseif ($null -eq $sbOn) { 'kein UEFI' }
+              elseif ($dbx -and -not $dbx.Valid) { 'dbx beschaedigt' }
+              elseif ($allDone -and $dbx -and $dbx.Hashes -ge 50) { 'fertig' }
+              elseif ($allDone) { 'fertig, dbx fehlt' }
+              elseif ($hasWinCA2023 -and $bootmgr2023 -eq $true) { 'fertig ausser KEK' }
+              else { 'offen' }
+    $mode = if ($setup -eq 1) { 'Setup' } elseif ($setup -eq 0) { 'User' } else { '?' }
+    $vals = @(
+        (Get-Date -Format 'yyyy-MM-dd HH:mm'), $env:COMPUTERNAME, $serial, $cs.Manufacturer, $cs.Model,
+        $bios.SMBIOSBIOSVersion, ("{0}.{1}" -f $cv.CurrentBuildNumber, $cv.UBR), $ScriptVersion,
+        (YN $sbOn), $mode, (YN $hasKek2023), (YN $hasWinCA2023), (YN $hasUefiCA2023), (YN $hasOromCA2023),
+        (YN $bootmgr2023), $(if ($dbx) { $dbx.Hashes } else { '' }), $(if ($dbx) { YN $dbx.Valid } else { '?' }), $status
+    )
+    $line = ($vals | ForEach-Object { ("$_" -replace '[;\r\n]', ',') -replace '[^\x20-\x7E]', '?' }) -join ';'
+    $head = 'Datum;Hostname;Seriennummer;Hersteller;Modell;BIOS;Windows-Build;Skriptversion;SecureBoot;Modus;KEK2023;WindowsUEFICA2023;MicrosoftUEFICA2023;OptionROMCA2023;BootManager2023;dbxHashes;dbxGueltig;Status'
+    $targets = @(Join-Path $localDir 'Uebersicht.csv')
+    if (-not $sameDir) { $targets += Join-Path $scriptDir 'Uebersicht.csv' }
+    foreach ($t in $targets) {
+        try {
+            if (-not (Test-Path $t)) { Set-Content -Path $t -Value $head -Encoding ASCII -ErrorAction Stop }
+            Add-Content -Path $t -Value $line -Encoding ASCII -ErrorAction Stop
+        } catch { Write-Host "         Uebersicht.csv nicht schreibbar: $t" -ForegroundColor Yellow }
+    }
+    Write-Host ("         Uebersicht.csv ergaenzt (Status: {0})" -f $status) -ForegroundColor DarkGray
+}
+Write-Overview
 Copy-LogToScriptDir
 if (-not $NoPause) { Write-Host ""; Read-Host "Enter zum Beenden" | Out-Null }

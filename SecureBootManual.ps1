@@ -36,6 +36,7 @@ param(
     [string]$PayloadDir = "$env:SystemRoot\System32\SecureBootUpdates",
     [switch]$NoPause
 )
+$ScriptVersion = '1.3'
 
 # ---------------------------------------------------------------- Admin
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -79,7 +80,7 @@ function Copy-ToScriptDir([string]$Path, [string]$Kind) {
     if ($sameDir -or -not (Test-Path $Path)) { return $null }
     try { $dest = Get-SubDir $scriptDir $Kind; Copy-Item -Path $Path -Destination $dest -Recurse -Force -ErrorAction Stop; $dest } catch { $null }
 }
-$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBootManual', $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm'))
+$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBootManual', $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 try { Start-Transcript -Path $logFile -Force | Out-Null } catch { Write-Warning "Kein Protokoll moeglich: $_" }
 function Copy-LogToScriptDir {
     try { Stop-Transcript | Out-Null } catch {}
@@ -242,11 +243,37 @@ function Read-AuthPayload([string]$Path) {
     }
 }
 
+function Get-PayloadTarget($p) {
+    # Ziel: zuerst nach Dateiname (DBX-Dateien koennen auch ZERTIFIKATE enthalten = Sperrung!), dann nach Inhalt
+    if     ($p.Name -match 'dbx')                                { return 'dbx' }
+    elseif ($p.Name -match 'kek')                                { return 'KEK' }
+    elseif ($p.Certs | Where-Object { $_.Subject -match 'KEK' }) { return 'KEK' }
+    elseif ($p.Certs.Count -gt 0)                                { return 'db'  }
+    elseif ($p.Hashes -gt 0)                                     { return 'dbx' }
+    '?'
+}
+
+function Get-SkipReason($p, [string]$Target, [int]$MissingCount, [bool]$WithDbx) {
+    # $null = darf eingespielt werden, sonst der Grund fuers Ueberspringen
+    if ($p.Name -match 'DBXUpdate2024') { return 'SPERRT die alte Windows-CA 2011 (Dateiname) - wird von diesem Skript NIE eingespielt' }
+    if (-not $p.Valid)   { return 'Format nicht sauber erkannt - zu riskant' }
+    if ($p.Other -gt 0)  { return 'enthaelt unbekannte Eintragstypen - zu riskant' }
+    if ($Target -eq '?') { return 'Inhalt nicht erkannt' }
+    if ($Target -eq 'dbx' -and ($p.Certs | Where-Object { $_.Subject -match 'Production PCA 2011' })) {
+        return 'SPERRT die alte Windows-CA 2011 - wird von diesem Skript NIE eingespielt (aktueller Boot-Manager und alle aelteren Boot-Medien wuerden nicht mehr starten)'
+    }
+    if ($Target -eq 'dbx' -and $p.Certs.Count -gt 0) { return 'dbx mit Zertifikaten - zu riskant, nicht automatisch' }
+    if ($Target -eq 'dbx' -and -not $WithDbx)        { return 'dbx nur mit -IncludeDbx (5_Manuell_mit_dbx.cmd)' }
+    if ($Target -ne 'dbx' -and $MissingCount -eq 0)  { return 'bereits vorhanden' }
+    $null
+}
+
 # ================================================================ Vorpruefung
 Section "Vorpruefung"
 $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 Info ("{0} {1}, BIOS {2}" -f $cs.Manufacturer, $cs.Model, $bios.SMBIOSBIOSVersion)
+Info ("Skript-Version {0}, Geraet {1}" -f $ScriptVersion, $deviceId)
 Info ("Notfall-Weg ({0}): Taste {1} -> Secure Boot AUS (sicher)  bzw.  {2}" -f $vi.Vendor, $vi.Key, $vi.Reset)
 Info  "  Schluessel-Reset nur, solange der Boot-Manager noch 2011-signiert ist - sonst danach kein Start mit Secure Boot."
 try { $sbOn = Confirm-SecureBootUEFI -ErrorAction Stop } catch { $sbOn = $null }
@@ -290,13 +317,7 @@ foreach ($f in Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction 
     $p = Read-AuthPayload $f.FullName
     if (-not $p) { Info ("{0}: kein signiertes Variablen-Update, uebersprungen" -f $f.Name); continue }
 
-    # Ziel: zuerst nach Dateiname (DBX-Dateien koennen auch ZERTIFIKATE enthalten = Sperrung!), dann nach Inhalt
-    if     ($p.Name -match 'dbx')                                     { $target = 'dbx' }
-    elseif ($p.Name -match 'kek')                                     { $target = 'KEK' }
-    elseif ($p.Certs | Where-Object { $_.Subject -match 'KEK' })      { $target = 'KEK' }
-    elseif ($p.Certs.Count -gt 0)                                     { $target = 'db'  }
-    elseif ($p.Hashes -gt 0)                                          { $target = 'dbx' }
-    else                                                              { $target = '?'   }
+    $target = Get-PayloadTarget $p
 
     $what = if ($p.Certs.Count) { ($p.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', ' } else { "$($p.Hashes) Hashes" }
     $missing = @($p.Certs | Where-Object { -not $have.ContainsKey($_.Thumbprint) })
@@ -310,20 +331,8 @@ foreach ($f in Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction 
 
     $certKey = (@($p.Certs | ForEach-Object { $_.Thumbprint }) | Sort-Object) -join ','
 
-    $skip = $null
-    if ($p.Name -match 'DBXUpdate2024') {
-        $skip = 'SPERRT die alte Windows-CA 2011 (Dateiname) - wird von diesem Skript NIE eingespielt'
-    }
-    elseif (-not $p.Valid) { $skip = 'Format nicht sauber erkannt - zu riskant' }
-    elseif ($p.Other -gt 0) { $skip = 'enthaelt unbekannte Eintragstypen - zu riskant' }
-    elseif ($target -eq '?') { $skip = 'Inhalt nicht erkannt' }
-    elseif ($target -eq 'dbx' -and ($p.Certs | Where-Object { $_.Subject -match 'Production PCA 2011' })) {
-        $skip = 'SPERRT die alte Windows-CA 2011 - wird von diesem Skript NIE eingespielt (aktueller Boot-Manager und alle aelteren Boot-Medien wuerden nicht mehr starten)'
-    }
-    elseif ($target -eq 'dbx' -and $p.Certs.Count -gt 0) { $skip = 'dbx mit Zertifikaten - zu riskant, nicht automatisch' }
-    elseif ($target -eq 'dbx' -and -not $IncludeDbx) { $skip = 'dbx nur mit -IncludeDbx (5_Manuell_mit_dbx.cmd)' }
-    elseif ($target -ne 'dbx' -and $missing.Count -eq 0) { $skip = 'bereits vorhanden' }
-    elseif ($target -ne 'dbx' -and $planned.ContainsKey($certKey)) {
+    $skip = Get-SkipReason $p $target $missing.Count ([bool]$IncludeDbx)
+    if (-not $skip -and $target -ne 'dbx' -and $planned.ContainsKey($certKey)) {
         $planned[$certKey].Payloads += $p
         Info "-> Ersatzdatei (wird probiert, falls die erste abgelehnt wird)"
         continue

@@ -19,7 +19,8 @@ nur ohne Umlaute.
 7. [Ablage der Protokolle und Sicherungen](#ablage-der-protokolle-und-sicherungen)
 8. [Erfahrungen mit getesteten Geräten](#erfahrungen-mit-getesteten-geräten)
 9. [Aufruf per PowerShell](#aufruf-per-powershell)
-10. [Haftung](#haftung)
+10. [Selbsttest](#selbsttest)
+11. [Haftung](#haftung)
 
 ## Hintergrund
 
@@ -110,16 +111,20 @@ Liest alles aus und ändert nichts. Die Abschnitte im Protokoll:
 
 | Abschnitt | Inhalt |
 |---|---|
-| 1 | System: Modell, BIOS, Windows-Version, Seriennummer, Taste fürs Firmware-Setup |
+| 1 | System: Modell, BIOS, Windows-Version, Seriennummer, Skriptversion, Taste fürs Firmware-Setup |
 | 2 | Secure-Boot-Status: eingeschaltet, User Mode oder Setup Mode |
-| 3 bis 6 | Inhalt von PK, KEK, db und dbx mit dem Ablaufdatum jedes Zertifikats |
+| 3 bis 6 | Inhalt von PK, KEK, db und dbx mit dem Ablaufdatum jedes Zertifikats. Jede Variable wird außerdem auf ein sauberes Format geprüft; ein unlesbarer Rest (wie beim Fehler in Version 1.1) wird rot gemeldet, mit dem passenden Rettungsweg. |
 | 5b | Werkseinstellungen der Firmware (`dbDefault`). Fehlt dort die Windows UEFI CA 2023, ist ein Zurücksetzen der Schlüssel im BIOS nach dem Boot-Manager-Tausch gefährlich. |
-| 7 | Boot-Manager auf der EFI-Partition: mit welchem Zertifikat er signiert ist |
+| 7 | Boot-Manager auf der EFI-Partition: mit welchem Zertifikat er signiert ist. Dazu der Ausweich-Bootloader `\EFI\Boot\bootx64.efi` und die Booteinträge der Firmware. Ist der Ausweich-Bootloader noch eine Windows-Fassung von 2011, gibt es einen Hinweis. |
 | 8 | Registry-Werte der Windows-Wartung |
 | 9 | BitLocker-Status |
 | 10 | Ereignisse der letzten 60 Tage (siehe [Ergebnis prüfen](#ergebnis-prüfen)) |
 
-Am Ende steht eine Zusammenfassung mit den nächsten Schritten.
+Am Ende steht eine Zusammenfassung mit den nächsten Schritten. Zusätzlich hängt jeder Lauf eine
+Zeile an `Uebersicht.csv` an (lokal und neben den Skripten). Darin steht pro Lauf und Gerät der
+Stand von KEK, db, Boot-Manager und dbx sowie ein kurzer Status (`fertig`, `fertig ausser KEK`,
+`offen`, `dbx beschaedigt` usw.). Die Datei lässt sich direkt in Excel öffnen und zeigt, welche
+PCs noch fehlen.
 
 ### `2_Update_anstossen.cmd`
 
@@ -181,6 +186,25 @@ Wie die Firmware mit dem zurückgeschriebenen PK umgeht, ist je nach Hersteller 
 Die dbx übernimmt das Skript ausschließlich als saubere SHA256-Hashlisten. Vor dem Schreiben prüft
 es alle Daten auf ein gültiges Format.
 
+### `7_Sicherung_zurueckspielen.cmd`
+
+Schreibt einen früheren Stand zurück in die Firmware. Zur Auswahl stehen alle Sicherungen dieses
+Geräts, also `Backups\<PC>\Backup_*` (angelegt von `4_` und `5_` vor jedem Schreiben) und
+`Rebuild\<PC>\Original` (angelegt vom ersten Lauf von `6_`). Zu jeder Sicherung zeigt das Skript,
+ob KEK 2023 und Windows UEFI CA 2023 enthalten sind und wie viele Hashes die dbx hat.
+
+Wie bei `6_` geht das nur im Setup Mode:
+
+1. `7_Sicherung_zurueckspielen.cmd` starten. Im User Mode listet es die Sicherungen auf und
+   erklärt, wie man bei diesem Hersteller die Schlüssel löscht.
+2. Neustart, im Firmware-Setup die Schlüssel löschen, Windows starten.
+3. `7_` erneut starten, die Nummer der Sicherung eingeben und mit `JA` bestätigen. Geschrieben
+   werden db, dbx, KEK und zuletzt der PK.
+
+Enthält die gewählte Sicherung die Windows UEFI CA 2023 nicht, warnt das Skript: Ist der
+Boot-Manager schon getauscht, muss Secure Boot dann aus bleiben, bis `5_` die Zertifikate wieder
+eingetragen hat. Eine beschädigte dbx in der Sicherung wird vor dem Schreiben bereinigt.
+
 ## Ergebnis prüfen
 
 Ein PC ist fertig, wenn `1_Pruefen.cmd` Folgendes zeigt:
@@ -222,6 +246,9 @@ Secure-Boot-Meldung):
 2. Windows starten und `5_Manuell_mit_dbx.cmd` ausführen.
 3. Secure Boot wieder einschalten.
 
+Meldet `1_Pruefen.cmd` eine beschädigte Variable, lässt sich mit `7_Sicherung_zurueckspielen.cmd`
+auch der Stand vor dem letzten Schreiben zurückholen.
+
 Hat das Zurücksetzen auch den KEK 2023 entfernt, lässt er sich auf Geräten, bei denen
 `6_Schluessel_neu_aufbauen.cmd` funktioniert, damit wieder eintragen.
 
@@ -239,6 +266,10 @@ Unterordner neben den Skripten kopiert, also z.B. auf den USB-Stick.
 | `Logs\<PC>\` | Protokoll jedes Laufs |
 | `Backups\<PC>\` | Sicherung von PK, KEK, db und dbx vor jedem Schreiben |
 | `Rebuild\<PC>\` | Daten für `6_Schluessel_neu_aufbauen` zwischen den beiden Läufen |
+| `Uebersicht.csv` | eine Zeile pro Lauf von `1_` und `2_`, über alle Geräte |
+
+Protokolldateien heißen nach Datum und Uhrzeit mit Sekunden, und jedes Protokoll nennt die
+Skriptversion.
 
 `<PC>` steht für `Hostname_Seriennummer`. So landen auch geklonte PCs mit gleichem Hostnamen in
 getrennten Ordnern. Ist keine Seriennummer auslesbar, wird nur der Hostname verwendet.
@@ -247,7 +278,7 @@ Diese Ordner enthalten gerätebezogene Daten und sind per `.gitignore` vom Repos
 
 ## Erfahrungen mit getesteten Geräten
 
-Stand 16.11.2026.
+Stand 17.11.2026, Skriptversion 1.3.
 
 | Gerät | Weg | Ergebnis |
 |---|---|---|
@@ -284,6 +315,8 @@ powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute
 powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute -IncludeDbx
 # 6_Schluessel_neu_aufbauen
 powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1
+# 7_Sicherung_zurueckspielen
+powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1 -Restore
 ```
 
 Weitere Parameter:
@@ -293,6 +326,20 @@ Weitere Parameter:
 | `-NoPause` | alle | am Ende nicht auf Enter warten |
 | `-PayloadDir` | Manual, Rebuild | anderer Ordner mit Update-Dateien statt `SecureBootUpdates` |
 | `-StateDir` | Rebuild | Rebuild-Daten von einem anderen Ort lesen, z.B. vom Stick |
+
+## Selbsttest
+
+Der Ordner `tests` prüft die Skripte, ohne die Firmware anzufassen und ohne Administratorrechte:
+
+| Datei | Wirkung |
+|---|---|
+| `tests\Tests_ausfuehren.cmd` | prüft Syntax, ASCII und Zeilenenden aller Skripte und testet die Prüf- und Entscheidungsfunktionen mit künstlichen Daten: gültige und beschädigte Signaturlisten, das ältere Dateiformat, eine PCA-2011-Sperre und `DBXUpdate2024` |
+| `tests\Testdateien_sammeln.cmd` | kopiert die Update-Dateien und die Variablen dieses PCs nach `tests\fixtures\<PC>_<Build>\` (nur lesen) |
+
+Liegen Testdateien vor, prüft `Tests_ausfuehren.cmd` zusätzlich, dass jede echte Microsoft-Datei
+erkannt wird und `DBXUpdate2024` immer abgelehnt wird. Gerade nach einem Windows-Update mit neuen
+Dateien in `SecureBootUpdates` lohnt sich das vor dem nächsten Schreiben. Die Testdateien sind
+Microsoft-Dateien und gerätebezogene Daten und werden deshalb nicht ins Repository übernommen.
 
 ## Haftung
 
