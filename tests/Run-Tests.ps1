@@ -90,6 +90,9 @@ foreach ($f in $files) {
         $tok = $null; $err = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tok, [ref]$err)
         Check "$($f.Name): Syntax" ($err.Count -eq 0) (($err | Select-Object -First 3 | ForEach-Object { "Zeile $($_.Extent.StartLineNumber): $($_.Message)" }) -join '; ')
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tok, [ref]$err)
+        $bad = @(if ($ast.ParamBlock) { $ast.ParamBlock.Parameters | Where-Object { $_.DefaultValue -and $_.DefaultValue.Extent.Text -match 'PSScriptRoot|PSCommandPath' } })
+        Check "$($f.Name): keine Standardwerte mit `$PSScriptRoot (in 5.1 dort leer)" ($bad.Count -eq 0) (($bad | ForEach-Object { $_.Name.Extent.Text }) -join ', ')
     }
 }
 

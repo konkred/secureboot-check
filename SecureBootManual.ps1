@@ -41,10 +41,12 @@ param(
     [switch]$IncludeDbx,
     [string]$PayloadDir = "$env:SystemRoot\System32\SecureBootUpdates",
     [switch]$DbxStepwise,
-    [string]$StepDir = (Join-Path $PSScriptRoot 'dbx_schrittweise'),
+    [string]$StepDir,           # Standard: Ordner dbx_schrittweise neben dem Skript (wird unten gesetzt)
     [switch]$NoPause
 )
 $ScriptVersion = '1.3'
+# $PSScriptRoot ist in Windows PowerShell 5.1 bei den Standardwerten im param-Block noch leer
+if (-not $StepDir) { $StepDir = Join-Path (Split-Path -Parent $PSCommandPath) 'dbx_schrittweise' }
 
 # ---------------------------------------------------------------- Admin
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
