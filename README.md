@@ -216,10 +216,13 @@ eingetragen hat. Eine beschädigte dbx in der Sicherung wird vor dem Schreiben b
 
 ### `8_dbx_schrittweise.cmd`
 
-Für Firmwares, die die aktuelle Sperrliste von Windows mit `0xC0000022` ablehnen. Die Liste ist
-inzwischen gut 24 KB groß. Ältere Firmwares haben teils eine Grenze pro Schreibvorgang oder wenig
-freien Variablenspeicher. Früher hat Windows die Sperren in mehreren kleineren Updates eingetragen;
-dieser Starter macht das nach.
+Für Firmwares, die die aktuelle Sperrliste von Windows mit `0xC0000022` ablehnen. Dafür gibt es
+zwei naheliegende Erklärungen, und der Starter prüft beide:
+
+| Vermutung | Hintergrund |
+|---|---|
+| Größe | Die Liste ist inzwischen gut 24 KB groß. Ältere Firmwares haben teils eine Grenze pro Schreibvorgang oder wenig freien Variablenspeicher. Früher hat Windows die Sperren in mehreren kleineren Updates eingetragen. |
+| Zeitstempel | Jede Datei trägt ein Signaturdatum. Manche frühen Firmwares nehmen beim Anhängen nur Dateien an, die neuer signiert sind als der Stand, der schon in der dbx steht. |
 
 Das Skript sammelt alle dbx-Dateien aus dem Ordner `dbx_schrittweise` neben den Skripten (auch aus
 Unterordnern) und aus `SecureBootUpdates`. Es
@@ -228,10 +231,13 @@ Unterordnern) und aus `SecureBootUpdates`. Es
    PCA-2011-Sperre, Dateien mit unsauberem Format und Dateien, deren Hashes schon alle in der dbx
    stehen,
 2. zeigt eine Tabelle mit Größe, Datum, Anzahl Hashes und wie viele davon neu wären,
-3. schreibt nach einem `JA` eine Datei nach der anderen, die kleinste zuerst, und macht nach einer
-   Ablehnung mit der nächsten weiter,
-4. wertet am Ende aus: Wird schon die kleinste Datei abgelehnt, liegt es nicht an der Größe. Werden
-   kleine Dateien angenommen und große abgelehnt, nennt es die Grenze.
+3. schreibt nach einem `JA` eine Datei nach der anderen, die älteste zuerst und bei gleichem Datum
+   die kleinste, und macht nach einer Ablehnung mit der nächsten weiter. Die Reihenfolge nach Datum
+   sorgt dafür, dass eine angenommene Datei die nächste nicht wegen des Zeitstempels blockiert.
+4. wertet am Ende beide Vermutungen getrennt aus. Größe passt, wenn alle abgelehnten Dateien größer
+   sind als alle angenommenen; dann nennt es die Grenze. Zeitstempel passt, wenn alle abgelehnten
+   Dateien älter signiert sind als alle angenommenen. Wird alles abgelehnt, auch die kleinste und
+   die neueste Datei, nimmt die Firmware das Anhängen an die dbx von Windows aus gar nicht an.
 
 Die zusätzlichen Dateien stellt Microsoft im öffentlichen GitHub-Repository
 [microsoft/secureboot_objects](https://github.com/microsoft/secureboot_objects) bereit. Geeignet

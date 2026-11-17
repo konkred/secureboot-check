@@ -345,8 +345,11 @@ Info "Ordner: $backupDir"
 # ================================================================ DBX SCHRITTWEISE (8_)
 if ($DbxStepwise) {
     Section "dbx Datei fuer Datei"
-    Info "Die Firmware bekommt jede Sperrliste einzeln, die kleinste zuerst. So zeigt sich, ob sie nur"
-    Info "grosse Dateien ablehnt (Groessengrenze) oder das Anhaengen an die dbx grundsaetzlich."
+    Info "Die Firmware bekommt jede Sperrliste einzeln, die aelteste zuerst (bei gleichem Datum die kleinste)."
+    Info "Geprueft werden zwei Vermutungen:"
+    Info "  Groesse:     die Firmware nimmt nur Dateien bis zu einer bestimmten Groesse an"
+    Info "  Zeitstempel: die Firmware nimmt nur Dateien an, die neuer signiert sind als der Stand in der dbx"
+    Info "Aelteste zuerst sorgt dafuer, dass eine angenommene Datei die naechste nicht wegen des Datums blockiert."
     if (-not (Test-Path $StepDir)) {
         New-Item -ItemType Directory -Path $StepDir -Force -ErrorAction SilentlyContinue | Out-Null
         Warn "Ordner $StepDir war leer bzw. fehlte und wurde angelegt."
@@ -385,11 +388,11 @@ if ($DbxStepwise) {
 
     Write-Host ""
     Info ("{0,-44} {1,-10} {2,7} {3,6} {4,6}  {5}" -f 'Datei', 'signiert', 'Bytes', 'Hashes', 'neu', 'Entscheidung')
-    foreach ($it in ($items | Sort-Object Size)) {
+    foreach ($it in ($items | Sort-Object { $_.P.Time }, Size)) {
         $dec = if ($it.Why) { "nein: $($it.Why)" } elseif ($it.New -eq 0) { 'nein: alles schon enthalten' } else { 'ja' }
         Info ("{0,-44} {1,-10} {2,7} {3,6} {4,6}  {5}" -f $(if ($it.Rel.Length -gt 44) { '...' + $it.Rel.Substring($it.Rel.Length - 41) } else { $it.Rel }), $it.P.Time.Substring(0, 10), $it.Size, $it.Hashes.Count, $it.New, $dec)
     }
-    $todo = @($items | Where-Object { -not $_.Why -and $_.New -gt 0 } | Sort-Object Size, { $_.P.Time })
+    $todo = @($items | Where-Object { -not $_.Why -and $_.New -gt 0 } | Sort-Object { $_.P.Time }, Size)
     if ($todo.Count -eq 0) { Write-Host ""; Ok "Nichts zu tun: die dbx enthaelt bereits alle Hashes der verwendbaren Dateien."; Finish }
 
     if (-not $Execute) {
@@ -421,11 +424,11 @@ if ($DbxStepwise) {
             $dbxNow = (Get-SecureBootUEFI -Name dbx).Bytes
             $haveH  = Get-EslHashes $dbxNow
             Ok ("{0} ({1} Bytes): angenommen, dbx {2} -> {3} Hashes, {4} Bytes" -f $it.Rel, $it.Size, $before, $haveH.Count, $dbxNow.Length)
-            $results += [pscustomobject]@{ Rel = $it.Rel; Size = $it.Size; Ok = $true; Msg = '' }
+            $results += [pscustomobject]@{ Rel = $it.Rel; Size = $it.Size; Time = $it.P.Time; Ok = $true; Msg = '' }
         } catch {
             $code = '0x{0:X8}' -f $_.Exception.HResult
             Bad ("{0} ({1} Bytes): abgelehnt, {2} {3}" -f $it.Rel, $it.Size, $code, $_.Exception.Message)
-            $results += [pscustomobject]@{ Rel = $it.Rel; Size = $it.Size; Ok = $false; Msg = $code }
+            $results += [pscustomobject]@{ Rel = $it.Rel; Size = $it.Size; Time = $it.P.Time; Ok = $false; Msg = $code }
         }
     }
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -433,19 +436,34 @@ if ($DbxStepwise) {
     Section "Ergebnis dbx schrittweise"
     $okR = @($results | Where-Object { $_.Ok }); $badR = @($results | Where-Object { -not $_.Ok })
     Info ("{0} angenommen, {1} abgelehnt, dbx jetzt {2} Hashes" -f $okR.Count, $badR.Count, $haveH.Count)
+    if ($results.Count) {
+        Write-Host ""
+        Info ("{0,-44} {1,-10} {2,7}  {3}" -f 'Versuch', 'signiert', 'Bytes', 'Ergebnis')
+        foreach ($r in $results) { Info ("{0,-44} {1,-10} {2,7}  {3}" -f $(if ($r.Rel.Length -gt 44) { '...' + $r.Rel.Substring($r.Rel.Length - 41) } else { $r.Rel }), $r.Time.Substring(0, 10), $r.Size, $(if ($r.Ok) { 'angenommen' } else { "abgelehnt $($r.Msg)" })) }
+        Write-Host ""
+    }
     if ($results.Count -and $okR.Count -eq 0) {
-        Warn ("Schon die kleinste Datei ({0} Bytes) wurde abgelehnt." -f ($results | Select-Object -First 1).Size)
-        Info "Eine Groessengrenze ist damit unwahrscheinlich. Die Firmware nimmt Anhaengen an die dbx offenbar"
-        Info "grundsaetzlich nicht an (z.B. strenge Zeitstempelpruefung). Mit Microsoft-Dateien ist das nicht loesbar."
+        $minSize = ($results | Measure-Object Size -Minimum).Minimum
+        $newest  = ($results | Sort-Object Time | Select-Object -Last 1).Time.Substring(0, 10)
+        Warn ("Alles abgelehnt, auch die kleinste Datei ({0} Bytes) und die neueste (signiert {1})." -f $minSize, $newest)
+        Info "Groesse:     unwahrscheinlich, schon die kleinste Datei ging nicht."
+        Info "Zeitstempel: nur moeglich, wenn die vorhandene dbx neuer markiert ist als alle Dateien"
+        Info "             (z.B. vom Hersteller so vorbelegt). Neuere KEK-2011-Dateien gibt es nicht mehr."
+        Info "Ergebnis: Diese Firmware nimmt das Anhaengen an die dbx von Windows aus nicht an."
     } elseif ($okR.Count -and $badR.Count) {
-        $maxOk  = ($okR | Measure-Object Size -Maximum).Maximum
+        $maxOk  = ($okR  | Measure-Object Size -Maximum).Maximum
         $minBad = ($badR | Measure-Object Size -Minimum).Minimum
-        if ($minBad -gt $maxOk) {
-            Warn ("Angenommen bis {0} Bytes, abgelehnt ab {1} Bytes: sieht nach einer Groessengrenze der Firmware aus." -f $maxOk, $minBad)
-            Info "Mehr als die angenommenen Dateien geht auf diesem Geraet vermutlich nicht."
-        } else {
-            Info "Angenommene und abgelehnte Dateien ueberschneiden sich in der Groesse, also keine reine Groessengrenze."
-        }
+        $sizeFits = $minBad -gt $maxOk
+        $oldestOk = ($okR  | Sort-Object Time | Select-Object -First 1).Time
+        $newestBad = ($badR | Sort-Object Time | Select-Object -Last 1).Time
+        $timeFits = $newestBad -lt $oldestOk
+        if ($sizeFits) { Warn ("Groesse:     passt. Angenommen bis {0} Bytes, abgelehnt ab {1} Bytes." -f $maxOk, $minBad) }
+        else           { Info ("Groesse:     passt nicht. Eine abgelehnte Datei ({0} Bytes) war kleiner als eine angenommene ({1} Bytes)." -f $minBad, $maxOk) }
+        if ($timeFits) { Warn ("Zeitstempel: passt. Abgelehnt bis Signaturdatum {0}, angenommen ab {1}." -f $newestBad.Substring(0, 10), $oldestOk.Substring(0, 10)) }
+        else           { Info  "Zeitstempel: passt nicht. Aeltere und neuere Dateien wurden gemischt angenommen und abgelehnt." }
+        if ($sizeFits -and $timeFits) { Info "Beide Erklaerungen passen zu diesem Ergebnis. Mehr Dateien mit anderer Groesse oder anderem Datum wuerden es klaeren." }
+        elseif (-not $sizeFits -and -not $timeFits) { Info "Kein klares Muster. Bitte das Protokoll aufheben, die Fehlercodes oben helfen bei der Suche." }
+        Info "Mehr als die angenommenen Dateien geht auf diesem Geraet vermutlich nicht."
     }
     if ($okR.Count) {
         Write-Host ""
