@@ -119,19 +119,47 @@ if ($haveCerts) {
     New-AuthFile (Join-Path $tmp 'KEKUpdate_2023.bin')   (New-Esl $X509Guid @(,$kek2023.RawData))
 }
 
-# ------------------------------------------------------------------ 2a. Manual (3_/4_/5_)
-Head "SecureBootManual.ps1: Parser und Entscheidungen"
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-Cms','Get-Signers','Get-SignerKek','Unwrap-Content','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason','Get-EslHashes','Get-StepSkipReason'))) { . ([scriptblock]::Create($t)) }
+# ------------------------------------------------------------------ 1b. Aufbau
+Head "Aufbau: Starter, gemeinsame Funktionen, alte Namen"
+$common = Join-Path $root 'SecureBootCommon.ps1'
+Check "SecureBootCommon.ps1 vorhanden" (Test-Path $common)
+foreach ($f in @(Get-ChildItem $root -Filter *.cmd -File)) {
+    $txt = [IO.File]::ReadAllText($f.FullName)
+    $ps = if ($txt -match '%~dp0([^"\s]+\.ps1)') { $Matches[1] } else { '' }
+    Check "$($f.Name): startet ein vorhandenes Skript ($ps)" ($ps -and (Test-Path (Join-Path $root $ps)))
+}
+foreach ($f in @(Get-ChildItem $root -Filter *.ps1 -File | Where-Object { $_.Name -ne 'SecureBootCommon.ps1' })) {
+    Check "$($f.Name): laedt SecureBootCommon.ps1" ([IO.File]::ReadAllText($f.FullName) -match "SecureBootCommon\.ps1")
+}
+$old = '3_Manuell|4_Manuell|5_Manuell|6_Schluessel|7_Sicherung|8_dbx|IncludeDbx|DbxStepwise|dbx_schrittweise'
+foreach ($f in @(Get-ChildItem $root -File | Where-Object { $_.Extension -in '.ps1', '.cmd', '.md', '.txt' })) {
+    $hits = @(Select-String -Path $f.FullName -Pattern $old -AllMatches | ForEach-Object { $_.LineNumber })
+    Check "$($f.Name): keine alten Starternamen" ($hits.Count -eq 0) ("Zeilen " + ($hits -join ', '))
+}
+
+# ------------------------------------------------------------------ 2a. Gemeinsame Funktionen
+Head "SecureBootCommon.ps1: Parser und Entscheidungen"
+. $common
 
 $e = Parse-Esl $hashEsl
-Check "Hashliste: 5 Hashes, gueltig" ($e.Hashes -eq 5 -and $e.Valid)
+Check "Hashliste: 5 Hashes, gueltig" ($e.Hashes -eq 5 -and $e.Unique -eq 5 -and $e.Valid)
 Check "Leere Variable gilt als gueltig" ((Parse-Esl ([byte[]]@())).Valid)
 $e = Parse-Esl $garbage
-Check "Hashliste mit Muell dahinter: ungueltig" (-not $e.Valid)
+Check "Hashliste mit Muell dahinter: ungueltig, sauberer Teil benannt" (-not $e.Valid -and $e.GoodBytes -eq $hashEsl.Length)
+Check "Doppelte Hashes erkannt" ((Parse-Esl (Cat-Bytes @($hashEsl, $hashEsl))).Unique -eq 5)
 Check "Get-CleanDbx entfernt den Muell" ((Get-CleanDbx $garbage).Length -eq $hashEsl.Length)
 Check "Get-CleanDbx entfernt unbekannte Listen" ((Get-CleanDbx (Cat-Bytes @($hashEsl, $otherEsl))).Length -eq $hashEsl.Length)
 Check "Unbekannter Typ wird als Other gezaehlt" ((Parse-Esl $otherEsl).Other -eq 1)
 Check "Unwrap: normales Format bleibt unveraendert" (-not (Unwrap-Content $hashEsl).Wrapped)
+$dd = Get-DedupDbx (Cat-Bytes @($hashEsl, $hashEsl, (New-HashEsl 2)))
+Check "Get-DedupDbx: doppelte Hashes zusammengefasst" ((Parse-Esl $dd).Hashes -eq 7 -and (Parse-Esl $dd).Valid)
+Check "Get-DedupDbx: leere Eingabe bleibt leer" ((Get-DedupDbx ([byte[]]@())).Length -eq 0)
+$h1 = New-HashEsl 3; $h2 = New-HashEsl 2
+$have = Get-EslHashes $h1
+Check "Get-EslHashes zaehlt Hashes" ($have.Count -eq 3)
+$both = Get-EslHashes (Cat-Bytes @($h1, $h2))
+Check "Get-EslHashes erkennt Neues" (@($both | Where-Object { -not $have.Contains($_) }).Count -eq 2)
+Check "Get-EslHashes ignoriert Muell" ((Get-EslHashes $garbage).Count -eq 5)
 if ($haveCerts) {
     $e = Parse-Esl (Cat-Bytes @($certEsl, $hashEsl))
     Check "Zertifikat + Hashes erkannt" ($e.Certs.Count -eq 1 -and $e.Hashes -eq 5 -and $e.Valid)
@@ -139,93 +167,157 @@ if ($haveCerts) {
 }
 
 function P([string]$n) { Read-AuthPayload (Join-Path $tmp $n) }
+function Renamed($p, [string]$Name) { $c = $p.PSObject.Copy(); $c.Name = $Name; $c }
 $p = P 'dbxupdate.bin'
 Check "Auth-Datei gelesen, 8 Hashes" ($p -and $p.Hashes -eq 8 -and $p.Valid -and -not $p.Wrapped)
 Check "Ziel dbx" ((Get-PayloadTarget $p) -eq 'dbx')
-Check "dbx ohne -IncludeDbx: uebersprungen" ([bool](Get-SkipReason $p 'dbx' 0 $false))
-Check "dbx mit -IncludeDbx: erlaubt" ($null -eq (Get-SkipReason $p 'dbx' 0 $true))
+Check "dbx-Datei: erlaubt" ($null -eq (Get-SkipReason $p 'dbx' 0))
 Check "Dummy-Signatur: KEK unbekannt" ($p.SignedBy -eq '?')
 $k23 = $p.PSObject.Copy(); $k23.SignedBy = '2023'
-Check "Mit KEK 2023 signiert, KEK 2023 fehlt: abgelehnt" ((Get-SkipReason $k23 'dbx' 0 $true $false) -match 'KEK 2023')
-Check "Mit KEK 2023 signiert, KEK 2023 da: erlaubt" ($null -eq (Get-SkipReason $k23 'dbx' 0 $true $true))
-Check "Schrittmodus: KEK-2023-Datei ohne KEK 2023 abgelehnt" ([bool](Get-StepSkipReason $k23 'dbxupdate.bin' $false))
+Check "Mit KEK 2023 signiert, KEK 2023 fehlt: abgelehnt" ((Get-SkipReason $k23 'dbx' 0 $false) -match 'KEK 2023')
+Check "Mit KEK 2023 signiert, KEK 2023 da: erlaubt" ($null -eq (Get-SkipReason $k23 'dbx' 0 $true))
+$k11 = $p.PSObject.Copy(); $k11.SignedBy = '2011'
+Check "Mit KEK 2011 signiert, KEK 2023 fehlt: erlaubt" ($null -eq (Get-SkipReason $k11 'dbx' 0 $false))
+Check "SVN-Datei: abgelehnt" ([bool](Get-SkipReason (Renamed $p 'DBXUpdateSVN.bin') 'dbx' 0))
+Check "x64-Datei: erlaubt" ($null -eq (Get-SkipReason (Renamed $p 'dbx_x64_Legacy.efiauth2') 'dbx' 0))
+Check "ia32-Datei: abgelehnt" ([bool](Get-SkipReason (Renamed $p 'dbx_ia32_Legacy.efiauth2') 'dbx' 0))
+Check "arm64-Datei: abgelehnt" ([bool](Get-SkipReason (Renamed $p 'dbx_arm64.efiauth2') 'dbx' 0))
 $p = P 'dbxupdate_wrapped.bin'
 Check "Aelteres Format: Kopf erkannt und abgeschnitten" ($p -and $p.Wrapped -and $p.Valid -and $p.Hashes -eq 5)
-$p = P 'dbx_garbage.bin'
-Check "Kaputte Datei: abgelehnt" ([bool](Get-SkipReason $p 'dbx' 0 $true))
+Check "Kaputte Datei: abgelehnt" ([bool](Get-SkipReason (P 'dbx_garbage.bin') 'dbx' 0))
 $p = P 'DBXUpdate2024.bin'
-Check "DBXUpdate2024: immer abgelehnt" ([bool](Get-SkipReason $p (Get-PayloadTarget $p) 0 $true))
+Check "DBXUpdate2024: immer abgelehnt" ([bool](Get-SkipReason $p (Get-PayloadTarget $p) 0))
 $p = P 'unknown_type.bin'
-Check "Unbekannter Eintragstyp: abgelehnt" ([bool](Get-SkipReason $p (Get-PayloadTarget $p) 1 $true))
+Check "Unbekannter Eintragstyp: abgelehnt" ([bool](Get-SkipReason $p (Get-PayloadTarget $p) 1))
+Check "Neuaufbau: normale dbx erlaubt" ($null -eq (Get-DbxSkipReason (P 'dbxupdate.bin')))
+Check "Neuaufbau: aelteres Format erlaubt" ($null -eq (Get-DbxSkipReason (P 'dbxupdate_wrapped.bin')))
+Check "Neuaufbau: kaputte Datei abgelehnt" ([bool](Get-DbxSkipReason (P 'dbx_garbage.bin')))
+Check "Neuaufbau: DBXUpdate2024 abgelehnt" ([bool](Get-DbxSkipReason (P 'DBXUpdate2024.bin')))
+Check "Neuaufbau: unbekannter Typ abgelehnt" ([bool](Get-DbxSkipReason (P 'unknown_type.bin')))
 if ($haveCerts) {
     $p = P 'DBXUpdateSVN_pca.bin'
-    Check "dbx mit PCA-2011-Zertifikat: abgelehnt" ((Get-SkipReason $p (Get-PayloadTarget $p) 0 $true) -match 'PCA 2011|CA 2011')
+    Check "dbx mit PCA-2011-Zertifikat: abgelehnt" ((Get-SkipReason $p (Get-PayloadTarget $p) 0) -match 'CA 2011')
+    Check "Neuaufbau: PCA-2011-Sperre abgelehnt" ([bool](Get-DbxSkipReason $p))
     $p = P 'DBUpdate2023.bin'
     Check "db-Datei: Ziel db" ((Get-PayloadTarget $p) -eq 'db')
-    Check "db-Datei fehlt noch: erlaubt" ($null -eq (Get-SkipReason $p 'db' 1 $false))
-    Check "db-Datei schon vorhanden: uebersprungen" ((Get-SkipReason $p 'db' 0 $false) -eq 'bereits vorhanden')
+    Check "db-Datei fehlt noch: erlaubt" ($null -eq (Get-SkipReason $p 'db' 1))
+    Check "db-Datei schon vorhanden: uebersprungen" ((Get-SkipReason $p 'db' 0) -eq 'bereits vorhanden')
     $p = P 'KEKUpdate_2023.bin'
-    Check "KEK-Datei: Ziel KEK" ((Get-PayloadTarget $p) -eq 'KEK')
+    Check "KEK-Datei: Ziel KEK, fehlt noch: erlaubt" ((Get-PayloadTarget $p) -eq 'KEK' -and $null -eq (Get-SkipReason $p 'KEK' 1))
 }
 
-Head "SecureBootManual.ps1: dbx schrittweise (8_)"
-$h1 = New-HashEsl 3; $h2 = New-HashEsl 2
-Check "Get-EslHashes zaehlt Hashes" ((Get-EslHashes $h1).Count -eq 3)
-$have = Get-EslHashes $h1
-Check "Get-EslHashes erkennt Neues" (@(Get-EslHashes (Cat-Bytes @($h1, $h2)) | Where-Object { -not $have.Contains($_) }).Count -eq 2)
-Check "Get-EslHashes ignoriert Muell" ((Get-EslHashes $garbage).Count -eq 5)
-$p = P 'dbxupdate.bin'
-Check "x64-Datei erlaubt" ($null -eq (Get-StepSkipReason $p 'dbx_x64_Legacy\dbx_x64_Legacy.efiauth2'))
-Check "amd64-Ordner erlaubt" ($null -eq (Get-StepSkipReason $p 'amd64\DBXUpdate.bin'))
-Check "x86-Datei abgelehnt" ([bool](Get-StepSkipReason $p 'x86\DBXUpdate.bin'))
-Check "ia32-Datei abgelehnt" ([bool](Get-StepSkipReason $p 'dbx_ia32_Legacy.efiauth2'))
-Check "arm64-Datei abgelehnt" ([bool](Get-StepSkipReason $p 'arm64\DBXUpdate.bin'))
-$svn = P 'dbxupdate.bin'; $svn = $svn.PSObject.Copy(); $svn.Name = 'DBXUpdateSVN.bin'
-Check "SVN-Datei abgelehnt" ([bool](Get-StepSkipReason $svn 'DBXUpdateSVN.bin'))
-Check "DBXUpdate2024 abgelehnt" ([bool](Get-StepSkipReason (P 'DBXUpdate2024.bin') 'DBXUpdate2024.bin'))
-Check "Kaputte Datei abgelehnt" ([bool](Get-StepSkipReason (P 'dbx_garbage.bin') 'dbx_garbage.bin'))
-
-# ------------------------------------------------------------------ 2b. Rebuild (6_/7_)
-Head "SecureBootRebuild.ps1: Parser und dbx-Entscheidung"
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootRebuild.ps1') @('Get-CN','Parse-Esl','Get-CleanDbx','Get-DedupDbx','Unwrap-Content','Read-AuthPayload','Get-DbxSkipReason'))) { . ([scriptblock]::Create($t)) }
-Check "Muell erkannt" (-not (Parse-Esl $garbage).Valid)
-Check "Get-CleanDbx entfernt den Muell" ((Get-CleanDbx $garbage).Length -eq $hashEsl.Length)
-$dd = Get-DedupDbx (Cat-Bytes @($hashEsl, $hashEsl, (New-HashEsl 2)))
-Check "Get-DedupDbx: doppelte Hashes zusammengefasst" ((Parse-Esl $dd).Hashes -eq 7 -and (Parse-Esl $dd).Valid)
-Check "Get-DedupDbx: leere Eingabe bleibt leer" ((Get-DedupDbx ([byte[]]@())).Length -eq 0)
-Check "Normale dbx-Datei: erlaubt" ($null -eq (Get-DbxSkipReason (P 'dbxupdate.bin')))
-Check "Aelteres Format: erlaubt" ($null -eq (Get-DbxSkipReason (P 'dbxupdate_wrapped.bin')))
-Check "Kaputte Datei: abgelehnt" ([bool](Get-DbxSkipReason (P 'dbx_garbage.bin')))
-Check "DBXUpdate2024: abgelehnt" ([bool](Get-DbxSkipReason (P 'DBXUpdate2024.bin')))
-Check "Unbekannter Typ: abgelehnt" ([bool](Get-DbxSkipReason (P 'unknown_type.bin')))
-if ($haveCerts) { Check "PCA-2011-Sperre: abgelehnt" ([bool](Get-DbxSkipReason (P 'DBXUpdateSVN_pca.bin'))) }
-
-# ------------------------------------------------------------------ 2c. Check (1_)
-Head "SecureBootCheck.ps1: Integritaetspruefung und Einordnung"
+# ------------------------------------------------------------------ 2b. Check (1_)
+Head "SecureBootCheck.ps1: Einlesen und Einordnung"
 $script:MockVars = @{}
 function Get-SecureBootUEFI { param([string]$Name, $ErrorAction) if (-not $script:MockVars.ContainsKey($Name)) { throw "nicht vorhanden" }; [pscustomobject]@{ Bytes = $script:MockVars[$Name] } }
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootCheck.ps1') @('Get-CN','Get-EfiSignatureList','Get-ChainKind'))) { . ([scriptblock]::Create($t)) }
+foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootCheck.ps1') @('Get-EfiSignatureList', 'Get-ChainKind'))) { . ([scriptblock]::Create($t)) }
 $script:MockVars['dbx'] = $hashEsl;  $l = Get-EfiSignatureList 'dbx'
 Check "Variable sauber: Valid" ($l.Valid -and $l.Hashes -eq 5 -and $l.GoodBytes -eq $hashEsl.Length)
-$script:MockVars['dbx'] = (Cat-Bytes @($hashEsl, $hashEsl)); $l = Get-EfiSignatureList 'dbx'
-Check "Doppelte Hashes erkannt" ($l.Hashes -eq 10 -and $l.Unique -eq 5)
 $script:MockVars['dbx'] = $garbage;  $l = Get-EfiSignatureList 'dbx'
-Check "Variable beschaedigt: erkannt, sauberer Teil benannt" (-not $l.Valid -and $l.GoodBytes -eq $hashEsl.Length)
+Check "Variable beschaedigt: erkannt" (-not $l.Valid -and $l.GoodBytes -eq $hashEsl.Length)
 Check "Fehlende Variable: null" ($null -eq (Get-EfiSignatureList 'KEK'))
 if ($haveCerts) {
     Check "Einordnung Windows 2023" ((Get-ChainKind @($win2023)) -match '2023')
     Check "Einordnung Windows 2011" ((Get-ChainKind @($pca2011)) -match '2011')
 }
 Check "Einordnung ohne Signatur" ((Get-ChainKind @()) -match 'keine')
+Remove-Item Function:\Get-SecureBootUEFI
+
+# ------------------------------------------------------------------ 2c. Windows 11 (6_)
+Head "Win11Check.ps1: Bewertungen"
+foreach ($t in (Get-FunctionTexts (Join-Path $root 'Win11Check.ps1') @('R', 'Test-CpuOfficial', 'Get-CpuRating', 'Get-RamRating', 'Get-DiskRating', 'Get-WddmFromDriverVersion', 'Get-MaxFeatureLevel', 'Get-GpuRating', 'Get-TpmRating', 'Get-SbRating', 'Get-Summary'))) { . ([scriptblock]::Create($t)) }
+function Lv($r) { $r.Level }
+$cpus = @(
+    @('Intel(R) Core(TM)2 Duo CPU     E8400  @ 3.00GHz', $false, 'Bad'),
+    @('Intel(R) Core(TM) i5-3470 CPU @ 3.20GHz', $true, 'Warn'),
+    @('Intel(R) Core(TM) i7 CPU         920  @ 2.67GHz', $true, 'Warn'),
+    @('Intel(R) Core(TM) i5 CPU         750  @ 2.67GHz', $true, 'Warn'),
+    @('Intel(R) Core(TM) i7-7700 CPU @ 3.60GHz', $true, 'Warn'),
+    @('Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz', $true, 'Ok'),
+    @('Intel(R) Core(TM) i5-6300U CPU @ 2.40GHz', $true, 'Warn'),
+    @('Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz', $true, 'Ok'),
+    @('Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz', $true, 'Ok'),
+    @('11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz', $true, 'Ok'),
+    @('Intel(R) Core(TM) i7-10700 CPU @ 2.90GHz', $true, 'Ok'),
+    @('12th Gen Intel(R) Core(TM) i5-1235U', $true, 'Ok'),
+    @('Intel(R) Core(TM) Ultra 7 155H', $true, 'Ok'),
+    @('Intel(R) Core(TM) 5 120U', $true, 'Ok'),
+    @('Intel(R) N100', $true, 'Ok'),
+    @('Intel(R) Core(TM) i3-N305', $true, 'Ok'),
+    @('Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz', $true, 'Ok'),
+    @('Intel(R) Pentium(R) CPU G4560 @ 3.50GHz', $true, 'Warn'),
+    @('Intel(R) Celeron(R) N4020 CPU @ 1.10GHz', $true, 'Ok'),
+    @('Intel(R) Celeron(R) CPU N3350 @ 1.10GHz', $true, 'Warn'),
+    @('Intel(R) Celeron(R) CPU G1840 @ 2.80GHz', $true, 'Warn'),
+    @('Intel(R) Xeon(R) CPU E3-1245 v5 @ 3.50GHz', $true, 'Warn'),
+    @('Intel(R) Xeon(R) E-2124 CPU @ 3.30GHz', $true, 'Ok'),
+    @('Intel(R) Xeon(R) Silver 4210 CPU @ 2.20GHz', $true, 'Ok'),
+    @('Intel(R) Xeon(R) Silver 4110 CPU @ 2.10GHz', $true, 'Warn'),
+    @('AMD Phenom(tm) II X4 965 Processor', $false, 'Bad'),
+    @('AMD FX(tm)-8350 Eight-Core Processor', $true, 'Warn'),
+    @('AMD A10-7850K Radeon R7, 12 Compute Cores 4C+8G', $true, 'Warn'),
+    @('AMD Ryzen 5 1600 Six-Core Processor', $true, 'Warn'),
+    @('AMD Ryzen 5 2600 Six-Core Processor', $true, 'Ok'),
+    @('AMD Ryzen 7 PRO 4750U with Radeon Graphics', $true, 'Ok'),
+    @('AMD Ryzen Threadripper 1950X 16-Core Processor', $true, 'Warn'),
+    @('AMD Ryzen AI 9 HX 370 w/ Radeon 890M', $true, 'Ok'),
+    @('AMD Athlon Silver 3050U with Radeon Graphics', $true, 'Ok'),
+    @('AMD Athlon 200GE with Radeon Vega Graphics', $true, 'Warn'),
+    @('AMD EPYC 7302P 16-Core Processor', $true, 'Ok'),
+    @('Exotic CPU 3000', $true, 'Warn')
+)
+foreach ($c in $cpus) {
+    $r = Get-CpuRating $c[0] $c[1] $true
+    Check ("CPU {0} -> {1}" -f ($c[0] -replace '\s+', ' '), $c[2]) ($r.Level -eq $c[2]) "(war $($r.Level): $($r.Text))"
+}
+Check "CPU 32 Bit -> Bad" ((Lv (Get-CpuRating 'Intel(R) Core(TM) i5-8500' $true $false)) -eq 'Bad')
+Check "CPU 1 Kern -> Bad" ((Lv (Get-CpuRating 'Intel(R) Core(TM) i5-8500' $true $true 1 3000)) -eq 'Bad')
+Check "RAM 2 GB -> Bad"   ((Lv (Get-RamRating 2)) -eq 'Bad')
+Check "RAM 4 GB -> Warn"  ((Lv (Get-RamRating 4)) -eq 'Warn')
+Check "RAM 8 GB -> Warn"  ((Lv (Get-RamRating 7.9)) -eq 'Warn')
+Check "RAM 16 GB -> Ok"   ((Lv (Get-RamRating 16)) -eq 'Ok')
+Check "Disk 32 GB SSD -> Bad"   ((Lv (Get-DiskRating 32 'SSD')) -eq 'Bad')
+Check "Disk 500 GB HDD -> Warn" ((Lv (Get-DiskRating 500 'HDD')) -eq 'Warn')
+Check "Disk 120 GB SSD -> Warn" ((Lv (Get-DiskRating 119 'SSD')) -eq 'Warn')
+Check "Disk 256 GB ? -> Warn"   ((Lv (Get-DiskRating 256 '')) -eq 'Warn')
+Check "Disk 256 GB SSD -> Ok"   ((Lv (Get-DiskRating 238 'SSD')) -eq 'Ok')
+Check "Treiber 27.20.100.8681 -> WDDM 2.7" ((Get-WddmFromDriverVersion '27.20.100.8681') -eq 2.7)
+Check "Treiber 31.0.101.4502 -> WDDM 3.1"  ((Get-WddmFromDriverVersion '31.0.101.4502') -eq 3.1)
+Check "Treiber 10.18.10.4358 -> WDDM 1.x"  ((Get-WddmFromDriverVersion '10.18.10.4358') -eq 1.0)
+Check "Feature Level aus Liste"            ((Get-MaxFeatureLevel '11_1,12_1,12_0,10_0') -eq 12.1)
+Check "GPU WDDM 2.7, FL 12_1 -> Ok"  ((Lv (Get-GpuRating 'Intel UHD 630' 2.7 12.1)) -eq 'Ok')
+Check "GPU Text mit Unterstrich"     ((Get-GpuRating 'Intel UHD 630' 2.7 12.1).Text -match '12_1')
+Check "GPU WDDM 1.3 -> Bad"          ((Lv (Get-GpuRating 'Intel HD 4000' 1.3 11.0)) -eq 'Bad')
+Check "GPU FL 10_1 -> Bad"           ((Lv (Get-GpuRating 'alt' 2.0 10.1)) -eq 'Bad')
+Check "GPU Basic Display -> Warn"    ((Lv (Get-GpuRating 'Microsoft Basic Display Adapter' 1.3 $null)) -eq 'Warn')
+Check "GPU unbekannt -> Warn"        ((Lv (Get-GpuRating 'X' $null $null)) -eq 'Warn')
+Check "TPM 2.0 -> Ok"                ((Lv (Get-TpmRating '2.0' $true)) -eq 'Ok')
+Check "TPM 2.0 aus -> Warn"          ((Lv (Get-TpmRating '2.0' $false)) -eq 'Warn')
+Check "TPM 1.2 -> Warn"              ((Lv (Get-TpmRating '1.2' $true)) -eq 'Warn')
+Check "kein TPM -> Bad"              ((Lv (Get-TpmRating '' $null)) -eq 'Bad')
+Check "Secure Boot Legacy -> Bad"    ((Lv (Get-SbRating $false $null $false $false)) -eq 'Bad')
+Check "Secure Boot aus -> Bad"       ((Lv (Get-SbRating $true $false $true $true)) -eq 'Bad')
+Check "Secure Boot 2011 -> Warn"     ((Lv (Get-SbRating $true $true $false $true)) -eq 'Warn')
+Check "Secure Boot 2023 -> Ok"       ((Lv (Get-SbRating $true $true $true $true)) -eq 'Ok')
+$okR = [ordered]@{ CPU = (R 'Ok' 'x'); RAM = (R 'Ok' 'x') }
+Check "Zusammenfassung alles gruen -> Ok" ((Lv (Get-Summary $okR)) -eq 'Ok')
+$okR['RAM'] = R 'Warn' 'x'
+Check "Zusammenfassung gelb -> Warn"      ((Lv (Get-Summary $okR)) -eq 'Warn')
+$okR['CPU'] = Get-CpuRating 'Intel Core2 Duo E8400' $false $true
+Check "Zusammenfassung alte CPU -> Bad"   ((Get-Summary $okR).Text -match 'Prozessor')
 
 # ------------------------------------------------------------------ 3. Echte Dateien
 $fx = Join-Path $testDir 'fixtures'
 $sets = @(if (Test-Path $fx) { Get-ChildItem $fx -Directory })
 Head ("Echte Dateien aus tests\fixtures ({0} Geraete)" -f $sets.Count)
-if ($sets.Count -eq 0) { Write-Host "         keine vorhanden - auf einem Windows-PC Testdateien_sammeln.cmd ausfuehren" }
+if ($sets.Count -eq 0) { Write-Host "         keine vorhanden, auf einem Windows-PC Testdateien_sammeln.cmd ausfuehren" }
+$k2011 = Join-Path $root 'dbx_KEK2011'
+$extra = @(if (Test-Path $k2011) { Get-ChildItem $k2011 -Recurse -File | Where-Object { $_.Extension -in '.bin', '.efiauth2', '.auth2' } })
+foreach ($f in $extra) {
+    $p = Read-AuthPayload $f.FullName
+    Check "dbx_KEK2011\$($f.Name): KEK-2011-signierte dbx, erlaubt ohne KEK 2023" ($p -and $p.SignedBy -eq '2011' -and (Get-PayloadTarget $p) -eq 'dbx' -and $null -eq (Get-SkipReason $p 'dbx' 0 $false))
+}
 foreach ($s in $sets) {
-    # Manual-Funktionen fuer die Payloads
-    foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootManual.ps1') @('Parse-Esl','Unwrap-Content','Get-Cms','Get-Signers','Get-SignerKek','Read-AuthPayload','Get-PayloadTarget','Get-SkipReason'))) { . ([scriptblock]::Create($t)) }
     foreach ($f in @(Get-ChildItem (Join-Path $s.FullName 'SecureBootUpdates') -Filter *.bin -ErrorAction SilentlyContinue)) {
         $p = Read-AuthPayload $f.FullName
         if (-not $p) { Write-Host ("         {0,-34} kein signiertes Variablen-Update (z.B. Sammeldatei), nicht geprueft" -f $f.Name); continue }
@@ -235,17 +327,15 @@ foreach ($s in $sets) {
         Check "$($s.Name)\$($f.Name): signierender KEK erkannt" ($p.SignedBy -ne '?')
         Check "$($s.Name)\$($f.Name): Inhalt erkannt" ($target -ne '?' -or $f.Name -notmatch 'db|kek')
         if (-not $p.Valid -or $p.Other -gt 0) { Check "$($s.Name)\$($f.Name): unsauber, daher abgelehnt" ([bool]$skip) }
-        if ($f.Name -match 'DBXUpdate2024') { Check "$($s.Name)\$($f.Name): nie eingespielt" ([bool]$skip) }
+        if ($f.Name -match 'DBXUpdate2024') {
+            Check "$($s.Name)\$($f.Name): nie eingespielt" ([bool]$skip)
+            Check "$($s.Name)\$($f.Name): Neuaufbau lehnt ab" ([bool](Get-DbxSkipReason $p))
+        }
         if ($target -eq 'dbx' -and ($p.Certs | Where-Object { $_.Subject -match 'Production PCA 2011' })) { Check "$($s.Name)\$($f.Name): PCA-2011-Sperre abgelehnt" ([bool]$skip) }
-    }
-    foreach ($t in (Get-FunctionTexts (Join-Path $root 'SecureBootRebuild.ps1') @('Parse-Esl','Unwrap-Content','Read-AuthPayload','Get-DbxSkipReason'))) { . ([scriptblock]::Create($t)) }
-    foreach ($f in @(Get-ChildItem (Join-Path $s.FullName 'SecureBootUpdates') -Filter *.bin -ErrorAction SilentlyContinue)) {
-        $p = Read-AuthPayload $f.FullName
-        if ($p -and $f.Name -match 'DBXUpdate2024') { Check "$($s.Name)\$($f.Name): 6_ lehnt ab" ([bool](Get-DbxSkipReason $p)) }
     }
     foreach ($f in @(Get-ChildItem (Join-Path $s.FullName 'Variablen') -Filter *.bin -ErrorAction SilentlyContinue)) {
         $e = Parse-Esl ([IO.File]::ReadAllBytes($f.FullName))
-        Write-Host ("         {0,-34} {1} Zert. {2,5} Hashes  {3}" -f $f.Name, $e.Certs.Count, $e.Hashes, $(if ($e.Valid) { 'sauber' } else { 'BESCHAEDIGT' }))
+        Write-Host ("         {0,-34} {1} Zert. {2,5} Hashes ({3} verschiedene)  {4}" -f $f.Name, $e.Certs.Count, $e.Hashes, $e.Unique, $(if ($e.Valid) { 'sauber' } else { 'BESCHAEDIGT' }))
         Check "$($s.Name)\Variablen\$($f.Name): sauber" $e.Valid
     }
 }

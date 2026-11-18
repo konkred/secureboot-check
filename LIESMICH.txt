@@ -1,478 +1,56 @@
-SECURE BOOT: ZERTIFIKATE VON 2011 AUF 2023 UMSTELLEN
-====================================================
-
-Die Microsoft-Zertifikate, mit denen Secure Boot seit 2012 arbeitet, laufen 2026 ab. Windows soll
-die Nachfolger von 2023 selbst einspielen, scheitert aber auf vielen aelteren PCs an der Firmware
-oder an einer Sperre von Microsoft. Diese Skripte zeigen, wo ein PC steht, stossen das Windows-Update
-an und tragen die neuen Zertifikate bei Bedarf von Hand ein.
-
-Dies ist die Textfassung fuer den USB-Stick. Die formatierte Fassung mit demselben Inhalt steht als
-README.md im Repository: https://github.com/konkred/secureboot-check
-
-HINTERGRUND
-===========
-
-Wie Secure Boot prueft
-----------------------
-
-Beim Start prueft die UEFI-Firmware jede Datei, die sie laedt (Boot-Manager, Treiber von
-Steckkarten), anhand von vier Variablen im Firmware-Speicher:
-
-  PK (Platform Key)
-      Inhalt: Schluessel des Geraeteherstellers, z.B. HP oder Lenovo
-      Wer darf sie aendern: nur der Hersteller
-  KEK (Key Exchange Key)
-      Inhalt: Schluessel, die db und dbx aendern duerfen, darunter Microsofts KEK
-      Wer darf sie aendern: Inhaber des PK
-  db
-      Inhalt: erlaubte Zertifikate: was damit signiert ist, darf starten
-      Wer darf sie aendern: Inhaber eines KEK
-  dbx
-      Inhalt: Sperrliste: bekannte unsichere Boot-Manager und Zertifikate
-      Wer darf sie aendern: Inhaber eines KEK
-
-Eine Aenderung an db oder dbx muss also mit einem Schluessel aus dem KEK signiert sein. Eine Aenderung
-am KEK muss mit dem PK des Herstellers signiert sein.
-
-Was ablaeuft und was es ersetzt
--------------------------------
-
-  Microsoft Corporation KEK CA 2011
-      laeuft ab: Juni 2026
-      Nachfolger von 2023: Microsoft Corporation KEK 2K CA 2023
-      Zweck: signiert Aenderungen an db und dbx
-  Microsoft Windows Production PCA 2011
-      laeuft ab: Oktober 2026
-      Nachfolger von 2023: Windows UEFI CA 2023
-      Zweck: signiert den Windows-Boot-Manager
-  Microsoft Corporation UEFI CA 2011
-      laeuft ab: Juni 2026
-      Nachfolger von 2023: Microsoft UEFI CA 2023
-      Zweck: signiert Fremd-Bootloader, z.B. Linux
-  (dieselbe UEFI CA 2011)
-      Nachfolger von 2023: Microsoft Option ROM UEFI CA 2023
-      Zweck: signiert Firmware von Steckkarten
-
-Ein bereits eingerichteter PC startet nach dem Ablaufdatum in der Regel weiter, weil die Firmware
-das Datum meist nicht prueft. Problematisch wird es bei allem, was neu dazukommt: Boot-Manager,
-Installationsmedien und Sperrlisten-Updates, die nur noch mit den 2023-Zertifikaten signiert sind,
-werden von einem PC ohne diese Zertifikate abgelehnt.
-
-Wie Windows das eigentlich selbst erledigt
-------------------------------------------
-
-Windows bringt die neuen Zertifikate als signierte Dateien in
-C:\Windows\System32\SecureBootUpdates\ mit. Der geplante Task Secure-Boot-Update spielt sie
-ein, gesteuert ueber den Registry-Wert
-HKLM\SYSTEM\CurrentControlSet\Control\Secureboot\AvailableUpdates:
-
-  0x0040   Windows UEFI CA 2023 in die db
-  0x0800   Microsoft UEFI CA 2023 in die db
-  0x1000   Option ROM UEFI CA 2023 in die db
-  0x0004   KEK 2023 eintragen
-  0x0100   Boot-Manager gegen die 2023-signierte Fassung tauschen
-  0x4000   Bedingung: Fremd-CAs nur, wenn die alte UEFI CA 2011 vorhanden ist
-
-Zusammen ergibt das 0x5944. Erledigte Bits loescht Windows wieder. Auf vielen Geraeten bleibt es
-dabei aber haengen:
-
-- Microsoft sperrt das Modell (Ereignis 1802, Grund Firmware_KI_...), weil bei diesem Modell
-  Firmwarefehler bekannt sind. Dann passiert gar nichts.
-- Der KEK fehlt (Ereignis 1803), weil Microsoft fuer dieses Modell keine vom Hersteller mit dem
-  PK signierte KEK-Datei hat. Bei aelteren Geraeten liefern die Hersteller diese Datei oft nicht mehr.
-
-Genau hier setzen die Skripte an.
-
-VORAUSSETZUNGEN
-===============
-
-- Windows 10 oder 11 mit aktuellen Updates, damit die Dateien in SecureBootUpdates vorhanden sind
-- UEFI-Start mit eingeschaltetem Secure Boot
-- herstellerunabhaengig; getestet mit HP, Lenovo und Chromebox (MrChromebox), mit Hinweisen fuer Dell,
-  Fujitsu, Surface, Acer, ASUS, MSI, Gigabyte, ASRock, Hyper-V und VMware
-- alle .cmd-Dateien per Doppelklick starten, sie fordern selbst Administratorrechte an
-- vom USB-Stick aus: den Stick vor dem Abziehen ueber "Hardware sicher entfernen" abmelden, sonst
-  fehlen Protokolle
-
-SCHNELLSTART
-============
-
-Dieser Ablauf hat sich auf allen getesteten Geraeten bewaehrt:
-
-  1
-      Datei: 1_Pruefen.cmd
-      Was passiert: Ist-Stand ansehen. Ist alles gruen, ist nichts zu tun.
-  2
-      Datei: 5_Manuell_mit_dbx.cmd
-      Was passiert: 2023-Zertifikate und Sperrliste von Hand einspielen. Jede Aenderung muss
-                    mit JA bestaetigt werden.
-  3
-      Datei: 2_Update_anstossen.cmd
-      Was passiert: Windows tauscht den Boot-Manager gegen die 2023-Fassung.
-  4
-      Datei: Neustart, dann 1_Pruefen.cmd
-      Was passiert: Kontrolle
-
-Wird die Sperrliste in Schritt 2 abgelehnt, hilft eventuell 8_dbx_schrittweise.cmd. Fehlt nach
-Schritt 4 der KEK 2023 oder bleibt die Sperrliste leer, kommt optional
-6_Schluessel_neu_aufbauen.cmd dazu (siehe unten). Ohne KEK 2023 startet der PC trotzdem normal.
-
-DIE WERKZEUGE IM DETAIL
-=======================
-
-1_Pruefen.cmd
--------------
-
-Liest alles aus und aendert nichts. Die Abschnitte im Protokoll:
-
-  1           System: Modell, BIOS, Windows-Version, Seriennummer, Skriptversion, Taste
-              fuers Firmware-Setup
-  2           Secure-Boot-Status: eingeschaltet, User Mode oder Setup Mode
-  3 bis 6     Inhalt von PK, KEK, db und dbx mit dem Ablaufdatum jedes Zertifikats. Jede
-              Variable wird ausserdem auf ein sauberes Format geprueft; ein unlesbarer Rest
-              (wie beim Fehler in Version 1.1) wird rot gemeldet, mit dem passenden
-              Rettungsweg.
-  5b          Werkseinstellungen der Firmware (dbDefault). Fehlt dort die Windows UEFI CA
-              2023, ist ein Zuruecksetzen der Schluessel im BIOS nach dem Boot-Manager-
-              Tausch gefaehrlich.
-  7           Boot-Manager auf der EFI-Partition: mit welchem Zertifikat er signiert ist.
-              Dazu der Ausweich-Bootloader \EFI\Boot\bootx64.efi und die Booteintraege der
-              Firmware. Ist der Ausweich-Bootloader noch eine Windows-Fassung von 2011, gibt
-              es einen Hinweis.
-  8           Registry-Werte der Windows-Wartung
-  9           BitLocker-Status
-  10          Ereignisse der letzten 60 Tage (siehe Ergebnis pruefen)
-
-Am Ende steht eine Zusammenfassung mit den naechsten Schritten. Zusaetzlich haengt jeder Lauf eine
-Zeile an Uebersicht.csv an (lokal und neben den Skripten). Darin steht pro Lauf und Geraet der
-Stand von KEK, db, Boot-Manager und dbx sowie ein kurzer Status (fertig, fertig ausser KEK,
-offen, dbx beschaedigt usw.). Die Datei laesst sich direkt in Excel oeffnen und zeigt, welche
-PCs noch fehlen.
-
-2_Update_anstossen.cmd
-----------------------
-
-Setzt AvailableUpdates auf 0x5944, startet den Task Secure-Boot-Update, wartet auf das Ende
-und prueft danach erneut. Das ist derselbe Weg, den Windows von sich aus geht, nur sofort statt
-irgendwann. Hat das Modell eine Sperre von Microsoft, traegt dieser Schritt allein nichts in die db
-ein. Ist die Windows UEFI CA 2023 aber schon in der db (von Hand oder ab Werk), tauscht er trotzdem
-den Boot-Manager.
-
-3_, 4_ und 5_: von Hand einspielen
-----------------------------------
-
-Die Dateien in SecureBootUpdates sind von Microsoft mit dem alten KEK 2011 signiert. Die Firmware
-nimmt sie deshalb auch an, wenn Windows selbst sie wegen der Modellsperre nicht verwendet. Das
-Skript SecureBootManual.ps1
-
-1. sichert PK, KEK, db und dbx nach Backups\<PC>\,
-2. zerlegt jede Datei in Zeitstempel, Signatur und Inhalt und liest daraus, welche Zertifikate
-   oder Hashes sie enthaelt,
-3. sortiert aus, was schon vorhanden ist oder nicht eingespielt werden darf,
-4. haengt den Rest nach Bestaetigung mit Set-SecureBootUEFI -AppendWrite an db bzw. dbx an.
-
-  3_Manuell_Trockenlauf.cmd   zeigt nur den Plan, aendert nichts
-  4_Manuell_einspielen.cmd    traegt die fehlenden 2023-Zertifikate in die db ein
-  5_Manuell_mit_dbx.cmd       wie 4, zusaetzlich die Hash-Sperren in die dbx
-
-Den KEK kann dieser Weg nicht eintragen, denn dafuer braeuchte es eine Signatur mit dem PK des
-Herstellers.
-
-Jede Datei ist mit einem Microsoft-KEK signiert, entweder mit dem alten KEK 2011 oder mit dem
-neuen KEK 2023. Die Firmware nimmt sie nur an, wenn dieser KEK bei ihr eingetragen ist. Das Skript
-zeigt die Kette zu jeder Datei an und ueberspringt Dateien, die mit dem KEK 2023 signiert sind,
-solange er auf dem PC fehlt. Das betrifft vor allem die Sperrliste: Neuere Windows-Versionen
-bringen dbxupdate.bin nur noch mit dem KEK 2023 signiert mit. Auf einem PC ohne KEK 2023 muss
-die Firmware sie mit 0xC0000022 ablehnen. Die mit dem KEK 2011 signierte Fassung spielt
-8_dbx_schrittweise.cmd ein.
-
-6_Schluessel_neu_aufbauen.cmd
------------------------------
-
-Fuer Faelle, in denen der KEK 2023 oder die dbx auf normalem Weg nicht hineinkommen. Der Trick: Loescht
-man im Firmware-Setup alle Schluessel, geht die Firmware in den Setup Mode. In diesem Zustand
-prueft sie keine Signaturen und laesst jede Variable schreiben. Das Skript laeuft deshalb zweimal:
-
-1. Erster Lauf (Firmware im User Mode): liest PK, KEK, db und dbx aus, fuegt den KEK 2023
-   (aus KEKUpdateCombined.bin), die fehlenden db-Zertifikate und die dbx-Hashes hinzu und speichert
-   das Ergebnis in Rebuild\<PC>\. Die Originale landen in Rebuild\<PC>\Original\.
-2. Neustart, im Firmware-Setup die Schluessel loeschen (bei HP "Clear Secure Boot Keys", bei Lenovo
-   "Reset to Setup Mode" oder "Clear All Secure Boot Keys"), Windows starten.
-3. Zweiter Lauf (Firmware im Setup Mode): prueft, ob die Daten zu diesem Geraet gehoeren, und
-   schreibt db, dbx, KEK und zuletzt den originalen PK zurueck. Mit dem PK wechselt die Firmware
-   zurueck in den User Mode.
-4. Neustart, dann 5_Manuell_mit_dbx.cmd (falls die dbx zurueckgefallen ist), 2_Update_anstossen.cmd
-   und nach einem weiteren Neustart 1_Pruefen.cmd.
-
-Wie die Firmware mit dem zurueckgeschriebenen PK umgeht, ist je nach Hersteller verschieden:
-
-  nimmt den PK an, User Mode erst nach dem Neustart
-      Beispiel: Lenovo ThinkCentre M93
-      Folge: alles bleibt erhalten
-  lehnt den PK ab, traegt ihren Werks-PK beim Neustart selbst ein
-      Beispiel: HP ProDesk 400 G5, EliteBook 840 G3
-      Folge: KEK und db bleiben, die dbx faellt zurueck und wird mit 5_ nachgezogen
-  laedt beim Loeschen die Werksschluessel (Key Ownership "HP Keys") oder lehnt den PK ab und bleibt ohne PK im Setup Mode ("Custom Keys")
-      Beispiel: HP Compaq Pro 6300
-      Folge: nicht moeglich, siehe unten
-
-HP und "Key Ownership": Aeltere HP-Firmwares haben unter Secure Boot Configuration die
-Einstellung "Key Ownership" mit den Werten "HP Keys" und "Custom Keys". Auf dem Compaq Pro 6300 gilt:
-
-- Mit HP Keys laedt "Clear Secure Boot Keys" beim naechsten Start wieder die Werksschluessel. Einen
-  Setup Mode gibt es so nicht.
-- Mit Custom Keys erreicht die Firmware den Setup Mode, und 6_ kann KEK (mit KEK 2023), db und dbx
-  schreiben. Den Original-PK von HP nimmt sie danach aber nicht an (0xC0000022). Ohne PK laesst
-  sich Secure Boot nicht einschalten.
-- Zurueck auf HP Keys laedt sie wieder die Werksschluessel. Deren db kennt die Windows UEFI CA 2023
-  nicht, also startet der neue Boot-Manager mit Secure Boot nur noch mit "invalid signature".
-
-Rueckweg in diesem Fall: Secure Boot aus, Key Ownership auf HP Keys, Windows starten,
-5_Manuell_mit_dbx.cmd, Secure Boot wieder an. 1_Pruefen.cmd erkennt den Zustand "Setup Mode
-ohne PK" und nennt diesen Weg.
-
-Die dbx uebernimmt das Skript ausschliesslich als saubere SHA256-Hashlisten, jeden Hash nur einmal. Vor dem Schreiben prueft
-es alle Daten auf ein gueltiges Format.
-
-7_Sicherung_zurueckspielen.cmd
-------------------------------
-
-Schreibt einen frueheren Stand zurueck in die Firmware. Zur Auswahl stehen alle Sicherungen dieses
-Geraets, also Backups\<PC>\Backup_* (angelegt von 4_ und 5_ vor jedem Schreiben) und
-Rebuild\<PC>\Original (angelegt vom ersten Lauf von 6_). Zu jeder Sicherung zeigt das Skript,
-ob KEK 2023 und Windows UEFI CA 2023 enthalten sind und wie viele Hashes die dbx hat.
-
-Wie bei 6_ geht das nur im Setup Mode:
-
-1. 7_Sicherung_zurueckspielen.cmd starten. Im User Mode listet es die Sicherungen auf und
-   erklaert, wie man bei diesem Hersteller die Schluessel loescht.
-2. Neustart, im Firmware-Setup die Schluessel loeschen, Windows starten.
-3. 7_ erneut starten, die Nummer der Sicherung eingeben und mit JA bestaetigen. Geschrieben
-   werden db, dbx, KEK und zuletzt der PK.
-
-Enthaelt die gewaehlte Sicherung die Windows UEFI CA 2023 nicht, warnt das Skript: Ist der
-Boot-Manager schon getauscht, muss Secure Boot dann aus bleiben, bis 5_ die Zertifikate wieder
-eingetragen hat. Eine beschaedigte dbx in der Sicherung wird vor dem Schreiben bereinigt.
-
-8_dbx_schrittweise.cmd
-----------------------
-
-Fuer PCs, deren Firmware die aktuelle Sperrliste von Windows mit 0xC0000022 ablehnt. Der
-haeufigste Grund ist der signierende KEK (siehe oben): Fehlt der KEK 2023, braucht es die mit dem
-KEK 2011 signierte Fassung, und die bringt Windows nicht mehr mit. Lehnt die Firmware auch diese ab,
-gibt es zwei weitere Erklaerungen, und der Starter prueft beide:
-
-  Groesse       Die Liste ist inzwischen gut 24 KB gross. Aeltere Firmwares haben teils eine
-                Grenze pro Schreibvorgang oder wenig freien Variablenspeicher. Frueher hat
-                Windows die Sperren in mehreren kleineren Updates eingetragen.
-  Zeitstempel   Jede Datei traegt ein Signaturdatum. Manche fruehen Firmwares nehmen beim
-                Anhaengen nur Dateien an, die neuer signiert sind als der Stand, der schon
-                in der dbx steht.
-
-Das Skript sammelt alle dbx-Dateien aus dem Ordner dbx_schrittweise neben den Skripten (auch aus
-Unterordnern) und aus SecureBootUpdates. Es
-
-1. sortiert aus, was nicht passt: andere Prozessorarchitekturen (x86, ARM), SVN-Eintraege, die
-   PCA-2011-Sperre, Dateien mit unsauberem Format, mit dem KEK 2023 signierte Dateien, solange er
-   fehlt, und Dateien, deren Hashes schon alle in der dbx stehen,
-2. zeigt eine Tabelle mit Signaturdatum, signierendem KEK, Groesse, Anzahl Hashes und wie viele
-   davon neu waeren,
-3. schreibt nach einem JA eine Datei nach der anderen, die aelteste zuerst und bei gleichem Datum
-   die kleinste, und macht nach einer Ablehnung mit der naechsten weiter. Die Reihenfolge nach Datum
-   sorgt dafuer, dass eine angenommene Datei die naechste nicht wegen des Zeitstempels blockiert.
-4. wertet am Ende beide Vermutungen getrennt aus. Groesse passt, wenn alle abgelehnten Dateien groesser
-   sind als alle angenommenen; dann nennt es die Grenze. Zeitstempel passt, wenn alle abgelehnten
-   Dateien aelter signiert sind als alle angenommenen. Wird alles abgelehnt, auch die kleinste und
-   die neueste Datei, nimmt die Firmware das Anhaengen an die dbx von Windows aus gar nicht an.
-
-Die zusaetzlichen Dateien stellt Microsoft im oeffentlichen GitHub-Repository
-microsoft/secureboot_objects bereit. Geeignet
-sind die mit dem KEK 2011 signierten Fassungen fuer x64:
-
-  PostSignedObjects/SignedByKEK2011/dbx_x64_Legacy
-                                   die vollstaendige Liste (etwa 17 KB) und zwei Dateien mit
-                                   je einem einzelnen Hash (etwa 3,4 KB)
-  PostSignedObjects/DBX/amd64      DBXUpdate.bin, die groesste Fassung (etwa 24 KB); laut
-                                   Microsoft veraltet, wird 2027 entfernt
-
-Die Dateien herunterladen und in dbx_schrittweise legen. Die Endung .efiauth2 kann bleiben. Die
-Einzel-Hash-Dateien sind die wichtigste Probe: Nimmt die Firmware nicht einmal die an, lehnt sie das
-Anhaengen an die dbx grundsaetzlich ab. Der Ordner ist per .gitignore vom Repository ausgeschlossen.
-
-ERGEBNIS PRUEFEN
-================
-
-Ein PC ist fertig, wenn 1_Pruefen.cmd Folgendes zeigt:
-
-- Pflicht: Die db enthaelt die Windows UEFI CA 2023, und der Boot-Manager ist mit ihr signiert.
-  Damit startet der PC auch mit kuenftigen Boot-Managern und Installationsmedien.
-- Kuer: Der KEK 2023 ist eingetragen (fuer kuenftige Updates von db und dbx), und die dbx hat
-  rund 300 Eintraege oder mehr.
-
-Ein verbleibendes AvailableUpdates = 0x4000 ist nur die Bedingung aus der Tabelle oben und kein
-Fehler.
-
-Die wichtigsten Ereignisse (Quelle Microsoft-Windows-TPM-WMI, Protokoll "System"):
-
-  1808         alle Zertifikate erfolgreich aktualisiert
-  1799         Boot-Manager mit 2023-Signatur installiert
-  1800         Neustart noetig
-  1801         Zertifikate aktualisiert, aber noch nicht vollstaendig angewendet
-  1797         Boot-Manager-Tausch abgebrochen, weil die Windows UEFI CA 2023 in der db
-               fehlt
-  1802         von Microsoft wegen bekannter Firmwarefehler dieses Modells gesperrt
-  1803         keine vom Hersteller signierte KEK-Datei fuer dieses Modell vorhanden
-  1795, 1796   die Firmware hat das Schreiben abgelehnt
-
-NOTFALL UND REGELN
-==================
-
-  !! Nach dem Tausch des Boot-Managers die Secure-Boot-Schluessel im BIOS nie mehr loeschen
-  oder auf Werkseinstellung zuruecksetzen. Die Werkseinstellungen der meisten aelteren
-  Geraete kennen die Windows UEFI CA 2023 nicht. Nach einem Reset startet Windows mit
-  eingeschaltetem Secure Boot nicht mehr. Ausnahme: 1_Pruefen.cmd meldet in Abschnitt 5b,
-  dass die Werkseinstellungen die Windows UEFI CA 2023 enthalten.
-
-Startet ein PC nach einem Schritt nicht (zum Beispiel mit "invalid signature" oder einer roten
-Secure-Boot-Meldung):
-
-1. Ins Firmware-Setup und Secure Boot ausschalten. Das ist immer gefahrlos. Die Taste zeigt
-   1_Pruefen.cmd in Abschnitt 1 an (HP: F10, Lenovo: F1, MrChromebox: Esc).
-2. Windows starten und 5_Manuell_mit_dbx.cmd ausfuehren.
-3. Secure Boot wieder einschalten.
-
-Meldet 1_Pruefen.cmd eine beschaedigte Variable, laesst sich mit 7_Sicherung_zurueckspielen.cmd
-auch der Stand vor dem letzten Schreiben zurueckholen.
-
-Hat das Zuruecksetzen auch den KEK 2023 entfernt, laesst er sich auf Geraeten, bei denen
-6_Schluessel_neu_aufbauen.cmd funktioniert, damit wieder eintragen.
-
-  !! Nie einspielen: DBXUpdate2024.bin und DBXUpdate2024Legacy.bin sperren die alte Windows
-  Production PCA 2011. Danach starten aeltere Boot-Manager, Windows-Installationsmedien und
-  Rettungssticks nicht mehr. Die Skripte ueberspringen diese Dateien immer, unabhaengig vom
-  Inhalt.
-
-ABLAGE DER PROTOKOLLE UND SICHERUNGEN
-=====================================
-
-Alles wird zuerst lokal unter C:\ProgramData\SecureBootCheck\ gespeichert und danach in denselben
-Unterordner neben den Skripten kopiert, also z.B. auf den USB-Stick.
-
-  Logs\<PC>\          Protokoll jedes Laufs
-  Backups\<PC>\       Sicherung von PK, KEK, db und dbx vor jedem Schreiben
-  Rebuild\<PC>\       Daten fuer 6_Schluessel_neu_aufbauen zwischen den beiden Laeufen
-  Uebersicht.csv      eine Zeile pro Lauf von 1_ und 2_, ueber alle Geraete
-  dbx_schrittweise\   selbst heruntergeladene dbx-Dateien fuer 8_ (liegt nur neben den
-                      Skripten)
-
-Protokolldateien heissen nach Datum und Uhrzeit mit Sekunden, und jedes Protokoll nennt die
-Skriptversion.
-
-<PC> steht fuer Hostname_Seriennummer. So landen auch geklonte PCs mit gleichem Hostnamen in
-getrennten Ordnern. Ist keine Seriennummer auslesbar, wird nur der Hostname verwendet.
-
-Diese Ordner enthalten geraetebezogene Daten und sind per .gitignore vom Repository ausgeschlossen.
-
-ERFAHRUNGEN MIT GETESTETEN GERAETEN
-===================================
-
-Stand 17.11.2026, Skriptversion 1.3.
-
-  HP ProDesk 400 G5
-      Weg: Schnellstart, dann 6_
-      Ergebnis: alles auf 2023
-  HP EliteBook 840 G3
-      Weg: Schnellstart, dann 6_
-      Ergebnis: alles auf 2023
-  Lenovo ThinkCentre M93 (10A4)
-      Weg: Schnellstart, dann 6_
-      Ergebnis: alles auf 2023; die dbx ging erst ueber 6_
-  Lenovo ThinkCentre M93p (10AA)
-      Weg: Schnellstart, dann 6_
-      Ergebnis: alles auf 2023 (siehe unten)
-  Chromebox Google Teemo (MrChromebox)
-      Weg: nur 2_
-      Ergebnis: alles auf 2023; die Firmware bringt die 2023-Zertifikate schon mit, ein
-                Reset ist hier ungefaehrlich
-  HP Compaq Pro 6300
-      Weg: Schnellstart, Versuch mit 6_ und "Custom Keys", Rueckweg
-      Ergebnis: db, Boot-Manager und dbx auf 2023, nur der KEK fehlt. Den HP-PK lehnt die
-                Firmware auch mit "Custom Keys" ab. Die volle dbx aus diesem Versuch blieb
-                beim Rueckweg auf "HP Keys" erhalten. Die dbx-Datei von Windows ist dort
-                nicht verwendbar, weil sie nur mit dem KEK 2023 signiert ist; 8_ mit der
-                KEK-2011-Fassung haette denselben Stand gebracht. 6_ warnt auf diesem Modell
-                und verlangt ein JA.
-  10ZiG Thin Client
-      Ergebnis: kein Secure Boot, nicht betroffen
-
-Fehler in Version 1.1 (behoben in 1.2): Auf dem M93p mit Windows-Build 19044.7725 lagen die
-DBXUpdate2024-Dateien in einem aelteren Format vor. Version 1.1 erkannte deren Inhalt nicht. Der
-zweite Lauf von 6_ schrieb ihn deshalb als unlesbaren Block in die dbx, und der PC startete mit
-Secure Boot nur noch mit "invalid signature". Seit Version 1.2 sind diese Dateien schon per
-Dateiname gesperrt, und der zweite Lauf von 6_ bereinigt eine so beschaedigte dbx automatisch.
-Damit liess sich der M93p retten.
-
-AUFRUF PER POWERSHELL
-=====================
-
-Die .cmd-Dateien rufen nur die drei Skripte auf. In einer PowerShell mit Administratorrechten im
-Skriptordner geht dasselbe so:
-
-    # 1_Pruefen
-    powershell -ExecutionPolicy Bypass -File .\SecureBootCheck.ps1
-    # 2_Update_anstossen
-    powershell -ExecutionPolicy Bypass -File .\SecureBootCheck.ps1 -Apply -Force
-    # 3_Manuell_Trockenlauf
-    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1
-    # 4_Manuell_einspielen
-    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute
-    # 5_Manuell_mit_dbx
-    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute -IncludeDbx
-    # 6_Schluessel_neu_aufbauen
-    powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1
-    # 7_Sicherung_zurueckspielen
-    powershell -ExecutionPolicy Bypass -File .\SecureBootRebuild.ps1 -Restore
-    # 8_dbx_schrittweise
-    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute -DbxStepwise
-
-Weitere Parameter:
-
-  -NoPause
-      Skripte: alle
-      Wirkung: am Ende nicht auf Enter warten
-  -PayloadDir
-      Skripte: Manual, Rebuild
-      Wirkung: anderer Ordner mit Update-Dateien statt SecureBootUpdates
-  -StateDir
-      Skripte: Rebuild
-      Wirkung: Rebuild-Daten von einem anderen Ort lesen, z.B. vom Stick
-  -StepDir
-      Skripte: Manual mit -DbxStepwise
-      Wirkung: anderer Ordner fuer die zusaetzlichen dbx-Dateien statt dbx_schrittweise
-
-Ohne -Execute zeigt -DbxStepwise nur die Tabelle und schreibt nichts.
-
-SELBSTTEST
-==========
-
-Der Ordner tests prueft die Skripte, ohne die Firmware anzufassen und ohne Administratorrechte:
-
-  tests\Tests_ausfuehren.cmd      prueft Syntax, ASCII und Zeilenenden aller Skripte und
-                                  testet die Pruef- und Entscheidungsfunktionen mit
-                                  kuenstlichen Daten: gueltige und beschaedigte
-                                  Signaturlisten, das aeltere Dateiformat, eine
-                                  PCA-2011-Sperre und DBXUpdate2024
-  tests\Testdateien_sammeln.cmd   kopiert die Update-Dateien und die Variablen dieses PCs
-                                  nach tests\fixtures\<PC>_<Build>\ (nur lesen)
-
-Liegen Testdateien vor, prueft Tests_ausfuehren.cmd zusaetzlich, dass jede echte Microsoft-Datei
-erkannt wird und DBXUpdate2024 immer abgelehnt wird. Gerade nach einem Windows-Update mit neuen
-Dateien in SecureBootUpdates lohnt sich das vor dem naechsten Schreiben. Die Testdateien sind
-Microsoft-Dateien und geraetebezogene Daten und werden deshalb nicht ins Repository uebernommen.
-
-HAFTUNG
-=======
-
-Eingriffe in die Secure-Boot-Variablen koennen einen PC am Starten hindern. Die Benutzung erfolgt
-auf eigene Gefahr. Vor dem ersten Schreiben die Ausgabe von 1_Pruefen.cmd und
-3_Manuell_Trockenlauf.cmd lesen und den Notfallweg kennen.
+SECURE BOOT 2011 -> 2023  und  WINDOWS-11-CHECK            Kurzanleitung, Version 2.0
+=====================================================================================
+Alle .cmd per Doppelklick starten (fordern selbst Adminrechte an).
+Stick vor dem Abziehen ueber "Hardware sicher entfernen" abmelden.
+Ausfuehrlich: README.md
+
+DIE STARTER
+  1_Pruefen.cmd                          zeigt den Stand, aendert nichts
+  2_Update_anstossen.cmd                 Windows spielt Zertifikate + Boot-Manager selbst ein
+  3_Zertifikate_einspielen.cmd           2023-Zertifikate + Sperrliste von Hand, erst nach JA
+  4_Experte_Schluessel_neu_aufbauen.cmd  Neuaufbau ueber Setup Mode (auch KEK 2023), 2 Laeufe
+  5_Sicherung_zurueckspielen.cmd         fruehere Sicherung zurueckschreiben (Setup Mode)
+  6_Windows11_Voraussetzungen_pruefen    CPU, RAM, Platte, Grafik, TPM, Secure Boot bewerten
+
+NORMALER ABLAUF
+  1. 1_Pruefen. Alles gruen = fertig.
+  2. 2_Update_anstossen, neu starten, 1_Pruefen.
+  3. Haengt es: 3_Zertifikate_einspielen (zeigt Plan, schreibt nach JA).
+  4. Neu starten, 2_Update_anstossen (Boot-Manager), neu starten, 1_Pruefen.
+  Fertig = db hat "Windows UEFI CA 2023" und der Boot-Manager ist damit signiert.
+  KEK 2023 und volle dbx (~300 Hashes) sind Kuer. Ohne KEK 2023 startet der PC normal.
+  KEK 2023 trotzdem gewuenscht: 4_Experte... (nicht auf HP Compaq Pro 6300).
+
+SPERRLISTE OHNE KEK 2023
+  Windows liefert die dbx nur noch mit KEK 2023 signiert. Fehlt der, nimmt 3_ die
+  gleichwertigen KEK-2011-Dateien aus dem Ordner dbx_KEK2011 und bietet den Download
+  von Microsoft (github.com/microsoft/secureboot_objects) an.
+
+NOTFALL: PC startet nicht ("invalid signature")
+  1. Firmware-Setup (Taste nennt 1_Pruefen; HP F10, Lenovo F1), Secure Boot AUS.
+  2. Windows starten, 3_Zertifikate_einspielen.
+  3. Secure Boot wieder AN.
+  Oder: 5_Sicherung_zurueckspielen holt den Stand vor dem letzten Schreiben zurueck.
+  "Setup Mode ohne PK" (HP Custom Keys): Secure Boot aus, Key Ownership "HP Keys",
+  Windows starten, 3_, Secure Boot an.
+
+NIE
+  - Nach dem Boot-Manager-Tausch die Schluessel im BIOS loeschen oder auf Werkseinstellung
+    setzen (ausser 1_Pruefen sagt, die Werkseinstellung kennt die Windows UEFI CA 2023).
+  - DBXUpdate2024*.bin einspielen (sperrt PCA 2011). Die Skripte ueberspringen sie immer.
+
+WINDOWS-11-CHECK (6_)
+  gruen = offiziell ok, gelb = laeuft, aber nicht offiziell/knapp, rot = geht nicht
+  CPU:   gruen ab Intel 8. Gen / Ryzen 2000, gelb aeltere Core i / Ryzen 1000 / FX,
+         rot ohne SSE4.2 (Core 2, Phenom): 24H2 startet dort nicht
+  RAM:   rot unter 4 GB, gelb 4 bis 8 GB, gruen mehr als 8 GB
+  Platte: rot unter 64 GB, gelb HDD oder unter 128 GB, gruen SSD ab 128 GB
+  Grafik: gruen WDDM 2.0 + DirectX 12, rot WDDM 1.x, gelb ohne Treiber
+  TPM:   gruen 2.0, gelb 1.2 oder aus, rot keins (BIOS: PTT bzw. fTPM)
+  Secure Boot: gruen an + 2023, gelb an + 2011 (weiter mit 1_ bis 3_), rot aus/Legacy
+
+ABLAGE (lokal C:\ProgramData\SecureBootCheck\ und Kopie neben den Skripten)
+  Logs\<PC>\  Backups\<PC>\  Rebuild\<PC>\  Uebersicht.csv  Win11_Uebersicht.csv
+  <PC> = Hostname_Seriennummer
+
+Selbsttest: tests\Tests_ausfuehren.cmd     Benutzung auf eigene Gefahr.

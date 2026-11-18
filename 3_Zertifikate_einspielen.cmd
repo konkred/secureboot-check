@@ -1,3 +1,3 @@
 @echo off
-REM ACHTUNG: schreibt Secure-Boot-Zertifikate von Hand (jeder Schritt mit JA bestaetigen)
+REM Zertifikate 2023 und Sperrliste von Hand einspielen: zeigt den Plan, schreibt erst nach JA
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0SecureBootManual.ps1" -Execute

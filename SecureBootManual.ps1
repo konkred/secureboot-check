@@ -1,621 +1,198 @@
 <#
 .SYNOPSIS
-    Secure-Boot-2023-Zertifikate VON HAND per Set-SecureBootUEFI einspielen
-    (umgeht die Microsoft-Sperre "Firmware_KI" / Ereignis 1802).
+    Secure-Boot-Zertifikate 2023 und Sperrliste (dbx) von Hand einspielen (3_Zertifikate_einspielen.cmd).
 
 .DESCRIPTION
-    ACHTUNG: Microsoft sperrt das automatische Update auf manchen Geraeten, weil
-    ein Firmwarefehler bekannt ist. Dieses Skript schreibt trotzdem. Im schlimmsten
-    Fall bootet der PC danach nicht mehr mit aktivem Secure Boot.
-    RETTUNG: Firmware-Setup (BIOS/UEFI) -> Secure Boot -> Schluessel auf Werkseinstellung
-             zuruecksetzen ODER Secure Boot aus. Das Skript zeigt den typischen Weg
-             fuer den erkannten Hersteller (HP, Dell, Lenovo, Fujitsu, Surface, ...).
+    Fuer Geraete, bei denen das Windows-Update nicht greift (z.B. Microsoft-Sperre, Ereignis 1802).
+    Nimmt nur von Microsoft signierte Dateien, haengt sie an (nichts wird geloescht) und laesst die
+    Firmware die Signatur pruefen.
 
-    Ablauf:
-      1. Sicherung von PK, KEK, db, dbx in C:\ProgramData\SecureBootCheck\Backups\<PC>\Backup_<Zeit>\
-         (und Kopie in den Skriptordner)
-      2. Durchsucht die von Windows mitgelieferten, von Microsoft signierten
-         Update-Dateien (C:\Windows\System32\SecureBootUpdates\*.bin) oder -PayloadDir
-      3. Zerlegt jede Datei (Zeitstempel / Signatur / Inhalt), zeigt welches Zertifikat
-         drin steckt und wohin es gehoert (db / KEK / dbx)
-      4. Ohne -Execute: nur anzeigen (Trockenlauf)
-         Mit  -Execute: jeden Schritt einzeln mit "JA" bestaetigen, dann schreiben
+      1. Sicherung von PK, KEK, db, dbx (Backups\<PC>\)
+      2. Plan: welche Datei wohin, was uebersprungen wird und warum
+      3. Mit -Execute: einmal JA, dann der Reihe nach schreiben
+         db (Windows UEFI CA 2023 zuerst), KEK (klappt nur mit Hersteller-Signatur), dbx
 
-    Reihenfolge: db (Windows UEFI CA 2023 zuerst), danach KEK, dbx nur mit -IncludeDbx.
-    Der KEK-Schritt klappt nur, wenn die Datei mit dem PK DIESES Geraets (Hersteller) signiert
-    ist - sonst lehnt die Firmware ab (harmlos).
-
-.PARAMETER DbxStepwise
-    Nur dbx, Datei fuer Datei (8_dbx_schrittweise.cmd): nimmt alle dbx-Dateien aus -StepDir
-    (Standard: Ordner dbx_schrittweise neben dem Skript) und aus -PayloadDir, kleinste zuerst,
-    und protokolliert zu jeder Datei Groesse und Ergebnis. Fuer Firmwares, die die grosse
-    aktuelle Sperrliste ablehnen.
+    dbx: Neuere Windows-Versionen liefern die Sperrliste nur noch mit dem KEK 2023 signiert. Fehlt der
+    KEK 2023, nimmt das Skript die gleichwertigen KEK-2011-Fassungen von Microsoft aus dem Ordner
+    dbx_KEK2011 neben dem Skript und bietet an, sie herunterzuladen.
+    DBXUpdate2024*.bin (sperrt die alte Windows-CA 2011) wird NIE eingespielt.
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1              # Trockenlauf
-    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute     # wirklich schreiben
+    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1              # nur Plan
+    powershell -ExecutionPolicy Bypass -File .\SecureBootManual.ps1 -Execute     # schreiben
 #>
 [CmdletBinding()]
 param(
     [switch]$Execute,
-    [switch]$IncludeDbx,
     [string]$PayloadDir = "$env:SystemRoot\System32\SecureBootUpdates",
-    [switch]$DbxStepwise,
-    [string]$StepDir,           # Standard: Ordner dbx_schrittweise neben dem Skript (wird unten gesetzt)
+    [string]$Kek2011Dir,        # Standard: dbx_KEK2011 neben dem Skript (unten gesetzt, $PSScriptRoot ist hier in 5.1 leer)
     [switch]$NoPause
 )
-$ScriptVersion = '1.3'
-# $PSScriptRoot ist in Windows PowerShell 5.1 bei den Standardwerten im param-Block noch leer
-if (-not $StepDir) { $StepDir = Join-Path (Split-Path -Parent $PSCommandPath) 'dbx_schrittweise' }
-
-# ---------------------------------------------------------------- Admin
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-           ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
-    if ($Execute)    { $argList += '-Execute' }
-    if ($IncludeDbx) { $argList += '-IncludeDbx' }
-    if ($NoPause)    { $argList += '-NoPause' }
-    if ($DbxStepwise) { $argList += @('-DbxStepwise', '-StepDir', "`"$StepDir`"") }
-    $argList += @('-PayloadDir', "`"$PayloadDir`"")
-    Start-Process powershell.exe -Verb RunAs -ArgumentList $argList
-    exit
-}
-
 $scriptDir = Split-Path -Parent $PSCommandPath
-$stamp     = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+if (-not $Kek2011Dir) { $Kek2011Dir = Join-Path $scriptDir 'dbx_KEK2011' }
+. (Join-Path $scriptDir 'SecureBootCommon.ps1')
+Assert-Admin $PSCommandPath $PSBoundParameters
+Initialize-Tool 'SecureBootManual'
 
-# Protokoll zuerst LOKAL schreiben (ueberlebt abgezogenen Stick), am Ende in den Skriptordner kopieren
-$localDir  = Join-Path $env:ProgramData 'SecureBootCheck'
-# Ordnerstruktur (lokal und im Skriptordner gleich):  Logs\<PC>\   Backups\<PC>\   Rebuild\<PC>\
-# Geraete-ID fuer die Ordner: <Hostname>_<Seriennummer>, damit gleich benannte PCs (geklonte
-# Images) nicht im selben Ordner landen. Ohne brauchbare Seriennummer: nur der Hostname.
-function Get-Serial {
-    $bad = '^(to be filled.*|default string|system serial number|none|n/?a|not (specified|available|applicable)|o\.?e\.?m\.?|0+|1234567890?|x+|chassis serial number)$'
-    foreach ($q in @(@('Win32_BIOS','SerialNumber'), @('Win32_ComputerSystemProduct','IdentifyingNumber'), @('Win32_SystemEnclosure','SerialNumber'))) {
+# Gleichwertige dbx mit KEK-2011-Signatur (zusammen dieselben Hashes wie Windows' dbxupdate.bin)
+$Kek2011Base  = 'https://raw.githubusercontent.com/microsoft/secureboot_objects/main/PostSignedObjects/SignedByKEK2011/dbx_x64_Legacy'
+$Kek2011Files = @(
+    'dbx_x64_Legacy.efiauth2'
+    'dbx_x64_2EA557C44B83C0AD6B71EFB7EDCC18B6337AD1C1D682155DD9451B051B62FF40.efiauth2'
+    'dbx_x64_86A9482509A434CA61EA4D12B6010A9013E5D3FBFF09B14799EBC87C124BCFF0.efiauth2'
+)
+
+function Get-Esl([string]$Name) { Parse-Esl (Get-VarBytes $Name) }
+function Short([string]$s, [int]$n) { if ($s.Length -gt $n) { '...' + $s.Substring($s.Length - $n + 3) } else { $s } }
+
+function Get-Kek2011Files {
+    # Laedt die drei Dateien von Microsoft (GitHub) und behaelt nur, was sauber als KEK-2011-signierte dbx erkannt wird
+    New-Item -ItemType Directory -Path $Kek2011Dir -Force -ErrorAction SilentlyContinue | Out-Null
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    $n = 0
+    foreach ($f in $Kek2011Files) {
+        $dest = Join-Path $Kek2011Dir $f
         try {
-            $v = "$((Get-CimInstance $q[0] -ErrorAction Stop | Select-Object -First 1).($q[1]))".Trim()
-            if ($v -match $bad) { continue }
-            $v = ($v -replace '[^A-Za-z0-9-]', '')
-            if ($v.Length -ge 4 -and $v -notmatch '^(.)\1+$' -and $v -notmatch '^(TOBEFILLED|DEFAULTSTRING|SYSTEMSERIAL)') { return $v.ToUpper() }
-        } catch {}
+            Invoke-WebRequest -Uri "$Kek2011Base/$f" -OutFile $dest -UseBasicParsing -ErrorAction Stop
+            $p = Read-AuthPayload $dest
+            if ($p -and $p.Valid -and $p.SignedBy -eq '2011' -and $p.Certs.Count -eq 0 -and $p.Hashes -gt 0) { Ok ("{0} geladen ({1} Hashes)" -f $f, $p.Hashes); $n++ }
+            else { Bad "$f ist keine KEK-2011-signierte Sperrliste, geloescht"; Remove-Item $dest -Force -ErrorAction SilentlyContinue }
+        } catch { Bad "$f nicht ladbar: $($_.Exception.Message)" }
     }
-    ''
-}
-$serial   = Get-Serial
-$deviceId = if ($serial) { "{0}_{1}" -f $env:COMPUTERNAME, $serial } else { $env:COMPUTERNAME }
-function Get-SubDir([string]$Root, [string]$Kind) { $d = Join-Path (Join-Path $Root $Kind) $deviceId; New-Item -ItemType Directory -Path $d -Force -ErrorAction SilentlyContinue | Out-Null; $d }
-$sameDir   = ($scriptDir.TrimEnd('\') -eq $localDir.TrimEnd('\'))
-function Copy-ToScriptDir([string]$Path, [string]$Kind) {
-    # Kopiert eine Datei/einen Ordner aus dem lokalen <Kind>\<PC>\ in den gleichen Unterordner im Skriptordner
-    if ($sameDir -or -not (Test-Path $Path)) { return $null }
-    try { $dest = Get-SubDir $scriptDir $Kind; Copy-Item -Path $Path -Destination $dest -Recurse -Force -ErrorAction Stop; $dest } catch { $null }
-}
-$logFile   = Join-Path (Get-SubDir $localDir 'Logs') ("{0}_{1}_{2}.txt" -f 'SecureBootManual', $deviceId, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
-try { Start-Transcript -Path $logFile -Force | Out-Null } catch { Write-Warning "Kein Protokoll moeglich: $_" }
-function Copy-LogToScriptDir {
-    try { Stop-Transcript | Out-Null } catch {}
-    $d = Copy-ToScriptDir $logFile 'Logs'
-    if ($d) { Write-Host "         Protokoll kopiert nach: $d" -ForegroundColor DarkGray }
-    elseif (-not $sameDir) { Write-Host "         Kopieren in den Skriptordner fehlgeschlagen" -ForegroundColor Yellow }
-    Write-Host "         Lokales Protokoll:      $logFile" -ForegroundColor DarkGray
-    Write-Host "         Stick vor dem Abziehen bitte 'sicher entfernen'." -ForegroundColor DarkGray
+    $n
 }
 
-function Get-VendorInfo {
-    # Typische Wege zum Zuruecksetzen der Secure-Boot-Schluessel - je nach Modell/BIOS-Version abweichend
-    $cs = Get-CimInstance Win32_ComputerSystem
-    $m = "$($cs.Manufacturer)"; $mo = "$($cs.Model)"
-    $v = [pscustomobject]@{ Vendor = $m.Trim(); Key = 'F2, F10, F1 oder Entf'; Reset = 'Secure Boot -> Schluessel auf Werkseinstellung (Restore Factory / Default Keys)'; Extra = '' }
-    if ($mo -match 'Virtual Machine' -and $m -match 'Microsoft') {
-        $v.Vendor = 'Hyper-V'; $v.Key = '(VM ausgeschaltet) Hyper-V-Manager'; $v.Reset = 'VM-Einstellungen -> Sicherheit -> Secure Boot aus, oder VM mit neuer Vorlage neu anlegen'
-    } elseif ($m -match 'VMware') {
-        $v.Vendor = 'VMware'; $v.Key = '(VM ausgeschaltet) VM-Einstellungen'; $v.Reset = 'VM Options -> Boot Options -> Secure Boot aus; NVRAM-Datei (.nvram) loeschen setzt die Schluessel zurueck'
-    } elseif ($m -match 'HP|Hewlett') {
-        $v.Vendor = 'HP'; $v.Key = 'F10'; $v.Reset = 'Advanced (aeltere Modelle: Security) -> Secure Boot Configuration -> Secure-Boot-Schluessel auf Werkseinstellung zuruecksetzen'; $v.Extra = 'Falls vorhanden: "Key Ownership" zeigt, ob HP- oder eigene Schluessel gelten (wichtig fuer 6_). "Sure Start Secure Boot Keys Protection" deaktivieren.'
-    } elseif ($m -match 'Dell') {
-        $v.Vendor = 'Dell'; $v.Key = 'F2'; $v.Reset = 'Secure Boot -> Expert Key Management -> Restore Settings (Factory)'
-    } elseif ($m -match 'Lenovo') {
-        $v.Vendor = 'Lenovo'; $v.Key = 'F1 (ThinkPad/ThinkCentre) bzw. F2 / Novo-Taste (IdeaPad)'; $v.Reset = 'Security -> Secure Boot -> Restore Factory Keys'
-    } elseif ($m -match 'Fujitsu') {
-        $v.Vendor = 'Fujitsu'; $v.Key = 'F2'; $v.Reset = 'Security -> Secure Boot Configuration -> Restore Factory Keys'
-    } elseif ($m -match 'Microsoft' -and $mo -match 'Surface') {
-        $v.Vendor = 'Microsoft Surface'; $v.Key = 'Lauter-Taste beim Einschalten halten'; $v.Reset = 'Security -> Secure Boot -> Microsoft Only / Default'
-    } elseif ($m -match 'ASUS|ASRock|Micro-Star|MSI|Gigabyte') {
-        $v.Key = 'Entf / F2'; $v.Reset = 'Boot -> Secure Boot -> Key Management -> Restore Factory Keys / Install Default Secure Boot Keys'
-    } elseif ($m -match 'Google' -or "$((Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion)" -match 'MrChromebox') {
-        $v.Vendor = 'Chromebox/Chromebook (MrChromebox-UEFI)'; $v.Key = 'Esc beim Start'; $v.Reset = 'Device Manager -> Secure Boot Configuration -> Reset Secure Boot Keys'
-    } elseif ($m -match 'Acer') {
-        $v.Vendor = 'Acer'; $v.Key = 'F2'; $v.Reset = 'Security -> Restore Secure Boot to Factory Default (ggf. erst Supervisor-Passwort setzen)'
-    }
-    $v
-}
-$vi = Get-VendorInfo
-
-function Section([string]$t) { Write-Host ""; Write-Host ("=" * 70) -ForegroundColor DarkCyan; Write-Host " $t" -ForegroundColor Cyan; Write-Host ("=" * 70) -ForegroundColor DarkCyan }
-function Ok([string]$t)   { Write-Host "  [OK]   $t" -ForegroundColor Green }
-function Bad([string]$t)  { Write-Host "  [!!]   $t" -ForegroundColor Red }
-function Warn([string]$t) { Write-Host "  [??]   $t" -ForegroundColor Yellow }
-function Info([string]$t) { Write-Host "         $t" }
-function Finish {
-    if ($backupDir) { $d = Copy-ToScriptDir $backupDir 'Backups'; if ($d) { Write-Host "         Sicherung kopiert nach: $d" -ForegroundColor DarkGray } }
-    Copy-LogToScriptDir
-    if (-not $NoPause) { Write-Host ""; Read-Host "Enter zum Beenden" | Out-Null }; exit }
-
-Add-Type -AssemblyName System.Security -ErrorAction SilentlyContinue
-$X509Guid   = [Guid]'a5c059a1-94e4-4aa7-87b5-ab155c2bf072'
-$Sha256Guid = [Guid]'c1c41626-504c-4092-aca9-41f936934328'
-$Pkcs7Guid  = [Guid]'4aafd29d-68df-49ee-8aa9-347d375665a7'
-
-function Get-CN([string]$dn) { if ($dn -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $dn } }
-
-function Parse-Esl([byte[]]$b) {
-    # EFI_SIGNATURE_LIST(s) -> Zertifikate + Anzahl Hashes
-    $certs = @(); $hashes = 0; $other = 0; $o = 0
-    if (-not $b) { return [pscustomobject]@{ Certs=@(); Hashes=0; Other=0; Valid=$true } }
-    while ($o + 28 -le $b.Length) {
-        $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
-        $listSize = [BitConverter]::ToUInt32($b, $o + 16)
-        $hdrSize  = [BitConverter]::ToUInt32($b, $o + 20)
-        $sigSize  = [BitConverter]::ToUInt32($b, $o + 24)
-        if ($listSize -lt 28 -or $sigSize -lt 16 -or ($o + $listSize) -gt $b.Length) { break }
-        $p = $o + 28 + $hdrSize
-        while ($p + $sigSize -le $o + $listSize) {
-            if ($type -eq $X509Guid) {
-                try { $certs += New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,[byte[]]$b[($p + 16)..($p + $sigSize - 1)]) } catch {}
-            } elseif ($type -eq $Sha256Guid) { $hashes++ } else { $other++ }
-            $p += $sigSize
-        }
-        $o += $listSize
-    }
-    # Valid = die Daten bestehen vollstaendig aus sauberen Signaturlisten (kein Rest, kein Muell)
-    [pscustomobject]@{ Certs = $certs; Hashes = $hashes; Other = $other; Valid = ($o -eq $b.Length) }
-}
-
-function Get-CleanDbx([byte[]]$b) {
-    # Behaelt nur saubere SHA256-Hashlisten - alles andere (Zertifikate, unbekannte Typen, Muell) faellt weg
-    $l = New-Object System.Collections.Generic.List[byte]; $o = 0
-    if (-not $b) { return ,([byte[]]@()) }
-    while ($o + 28 -le $b.Length) {
-        $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
-        $listSize = [BitConverter]::ToUInt32($b, $o + 16)
-        $sigSize  = [BitConverter]::ToUInt32($b, $o + 24)
-        if ($listSize -lt 28 -or $sigSize -lt 16 -or ($o + $listSize) -gt $b.Length) { break }
-        if ($type -eq $Sha256Guid) { $l.AddRange([byte[]]$b[$o..($o + $listSize - 1)]) }
-        $o += $listSize
-    }
-    ,$l.ToArray()
-}
-
-function Get-VarEsl([string]$Name) {
-    try { Parse-Esl (Get-SecureBootUEFI -Name $Name -ErrorAction Stop).Bytes } catch { $null }
-}
-
-function Get-Cms([byte[]]$sig) {
-    # PKCS7 aus EFI_VARIABLE_AUTHENTICATION_2: oft nacktes SignedData ohne ContentInfo -> ggf. einpacken
-    $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
-    try { $cms.Decode($sig); return $cms } catch {}
-    try {
-        $oid = [byte[]](0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
-        function DerLen([int]$n) { if ($n -lt 128) { ,[byte[]]@($n) } elseif ($n -lt 256) { ,[byte[]]@(0x81,$n) } else { ,[byte[]]@(0x82, ($n -shr 8), ($n -band 0xFF)) } }
-        $a0  = [byte[]](@(0xA0) + (DerLen $sig.Length) + $sig)
-        $seq = [byte[]]($oid + $a0)
-        $ci  = [byte[]](@(0x30) + (DerLen $seq.Length) + $seq)
-        $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
-        $cms.Decode($ci)
-        return $cms
-    } catch { return $null }
-}
-
-function Get-Signers([byte[]]$sig) {
-    $cms = Get-Cms $sig
-    if (-not $cms) { return @() }
-    @($cms.SignerInfos | ForEach-Object { if ($_.Certificate) { Get-CN $_.Certificate.Subject } })
-}
-
-function Get-SignerKek([byte[]]$sig) {
-    # Mit welchem Microsoft-KEK ist die Datei signiert? Die Firmware nimmt sie nur an, wenn dieser KEK eingetragen ist.
-    $cms = Get-Cms $sig
-    if (-not $cms) { return '?' }
-    $names = (@($cms.Certificates) | ForEach-Object { $_.Subject; $_.Issuer }) -join '|'
-    if ($names -match 'KEK 2K CA 2023') { return '2023' }
-    if ($names -match 'KEK CA 2011')    { return '2011' }
-    '?'
-}
-
-function Unwrap-Content([byte[]]$c) {
-    # Manche (aeltere) Microsoft-Dateien haben vor der Signaturliste noch
-    # VariablenName(UTF-16) + VendorGuid + Attribute + EFI_TIME - das wird hier abgeschnitten.
-    $known = @([Guid]'d719b2cb-3d3a-4596-a3bc-dad00e67656f', [Guid]'8be4df61-93ca-11d2-aa0d-00e098032b8c')
-    for ($n = 2; $n -le 40 -and $n + 36 -le $c.Length; $n += 2) {
-        $g = New-Object Guid (,[byte[]]$c[$n..($n + 15)])
-        if ($known -contains $g) {
-            $s = $n + 16 + 4 + 16
-            if ($s -lt $c.Length) { return [pscustomobject]@{ Content = [byte[]]$c[$s..($c.Length - 1)]; Wrapped = $true } }
+function Get-DbxCandidates([System.Collections.Generic.HashSet[string]]$Have, [bool]$HasKek23) {
+    # Alle dbx-Dateien aus Windows-Ordner und dbx_KEK2011, gleicher Inhalt nur einmal
+    $out = @(); $seen = @{}
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    foreach ($src in @($PayloadDir, $Kek2011Dir)) {
+        if (-not (Test-Path $src)) { continue }
+        $files = if ($src -eq $Kek2011Dir) { Get-ChildItem $src -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.bin', '.efiauth2', '.auth2' } }
+                 else { Get-ChildItem $src -Filter *.bin -File -ErrorAction SilentlyContinue }
+        foreach ($f in @($files)) {
+            $p = Read-AuthPayload $f.FullName
+            if (-not $p -or (Get-PayloadTarget $p) -ne 'dbx') { continue }
+            $key = [BitConverter]::ToString($sha.ComputeHash($p.Content))
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $hs = Get-EslHashes $p.Content
+            $out += [pscustomobject]@{ P = $p; Hashes = $hs; New = @($hs | Where-Object { -not $Have.Contains($_) }).Count; Why = (Get-SkipReason $p 'dbx' 0 $HasKek23) }
         }
     }
-    [pscustomobject]@{ Content = $c; Wrapped = $false }
-}
-
-function Read-AuthPayload([string]$Path) {
-    # EFI_VARIABLE_AUTHENTICATION_2 = EFI_TIME(16) + WIN_CERTIFICATE_UEFI_GUID + Inhalt
-    $b = [IO.File]::ReadAllBytes($Path)
-    if ($b.Length -lt 48) { return $null }
-    $year = [BitConverter]::ToUInt16($b, 0)
-    $dwLength = [BitConverter]::ToUInt32($b, 16)
-    $certType = [BitConverter]::ToUInt16($b, 22)
-    if ($year -lt 2000 -or $year -gt 2100 -or $certType -ne 0x0EF1) { return $null }
-    $guid = New-Object Guid (,[byte[]]$b[24..39])
-    if ($guid -ne $Pkcs7Guid) { return $null }
-    $contentStart = 16 + $dwLength
-    if ($contentStart -ge $b.Length) { return $null }
-    try { $dt = New-Object DateTime ($year, $b[2], $b[3], $b[4], $b[5], $b[6]) } catch { return $null }
-    $sig     = [byte[]]$b[40..($contentStart - 1)]
-    $uw      = Unwrap-Content ([byte[]]$b[$contentStart..($b.Length - 1)])
-    $content = $uw.Content
-    $esl     = Parse-Esl $content
-    [pscustomobject]@{
-        File    = $Path
-        Name    = Split-Path -Leaf $Path
-        Time    = $dt.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-        Sig     = $sig
-        Content = $content
-        Certs   = $esl.Certs
-        Hashes  = $esl.Hashes
-        Other   = $esl.Other
-        Valid   = $esl.Valid
-        Wrapped = $uw.Wrapped
-        Signers = Get-Signers $sig
-        SignedBy = Get-SignerKek $sig
-    }
-}
-
-function Get-PayloadTarget($p) {
-    # Ziel: zuerst nach Dateiname (DBX-Dateien koennen auch ZERTIFIKATE enthalten = Sperrung!), dann nach Inhalt
-    if     ($p.Name -match 'dbx')                                { return 'dbx' }
-    elseif ($p.Name -match 'kek')                                { return 'KEK' }
-    elseif ($p.Certs | Where-Object { $_.Subject -match 'KEK' }) { return 'KEK' }
-    elseif ($p.Certs.Count -gt 0)                                { return 'db'  }
-    elseif ($p.Hashes -gt 0)                                     { return 'dbx' }
-    '?'
-}
-
-function Get-SkipReason($p, [string]$Target, [int]$MissingCount, [bool]$WithDbx, [bool]$HasKek2023 = $true) {
-    # $null = darf eingespielt werden, sonst der Grund fuers Ueberspringen
-    if ($p.Name -match 'DBXUpdate2024') { return 'SPERRT die alte Windows-CA 2011 (Dateiname) - wird von diesem Skript NIE eingespielt' }
-    if (-not $p.Valid)   { return 'Format nicht sauber erkannt - zu riskant' }
-    if ($p.Other -gt 0)  { return 'enthaelt unbekannte Eintragstypen - zu riskant' }
-    if ($p.SignedBy -eq '2023' -and -not $HasKek2023) {
-        $alt = if ($Target -eq 'dbx') { ' (Ersatz: KEK-2011-Fassung ueber 8_dbx_schrittweise.cmd)' } else { '' }
-        return "mit dem KEK 2023 signiert, der auf diesem PC fehlt - die Firmware wuerde ablehnen$alt"
-    }
-    if ($Target -eq '?') { return 'Inhalt nicht erkannt' }
-    if ($Target -eq 'dbx' -and ($p.Certs | Where-Object { $_.Subject -match 'Production PCA 2011' })) {
-        return 'SPERRT die alte Windows-CA 2011 - wird von diesem Skript NIE eingespielt (aktueller Boot-Manager und alle aelteren Boot-Medien wuerden nicht mehr starten)'
-    }
-    if ($Target -eq 'dbx' -and $p.Certs.Count -gt 0) { return 'dbx mit Zertifikaten - zu riskant, nicht automatisch' }
-    if ($Target -eq 'dbx' -and -not $WithDbx)        { return 'dbx nur mit -IncludeDbx (5_Manuell_mit_dbx.cmd)' }
-    if ($Target -ne 'dbx' -and $MissingCount -eq 0)  { return 'bereits vorhanden' }
-    $null
-}
-
-function Get-EslHashes([byte[]]$b) {
-    # alle SHA256-Eintraege einer Signaturliste als Hex-Text (fuer "was ist neu")
-    $set = New-Object 'System.Collections.Generic.HashSet[string]'
-    $o = 0
-    if (-not $b) { return ,$set }
-    while ($o + 28 -le $b.Length) {
-        $type     = New-Object Guid (,[byte[]]$b[$o..($o + 15)])
-        $listSize = [BitConverter]::ToUInt32($b, $o + 16)
-        $hdrSize  = [BitConverter]::ToUInt32($b, $o + 20)
-        $sigSize  = [BitConverter]::ToUInt32($b, $o + 24)
-        if ($listSize -lt 28 -or $sigSize -lt 16 -or ($o + $listSize) -gt $b.Length) { break }
-        if ($type -eq $Sha256Guid -and $sigSize -ge 48) {
-            $p = $o + 28 + $hdrSize
-            while ($p + $sigSize -le $o + $listSize) { [void]$set.Add([BitConverter]::ToString($b, $p + 16, 32)); $p += $sigSize }
-        }
-        $o += $listSize
-    }
-    ,$set
-}
-
-function Get-StepSkipReason($p, [string]$RelPath, [bool]$HasKek2023 = $true) {
-    # Schrittmodus: nur dbx-Hashlisten fuer x64, ohne SVN- und PCA-2011-Sperren
-    $r = $RelPath.ToLower()
-    if ($r -notmatch 'x64|amd64|x86_64' -and $r -match 'ia32|x86|arm|aarch64') { return 'andere Prozessorarchitektur' }
-    if ($p.Name -match 'SVN') { return 'SVN-Eintrag (sperrt alte Boot-Manager-Versionen), das regelt Windows selbst' }
-    $t = Get-PayloadTarget $p
-    if ($t -ne 'dbx') { return "keine dbx-Datei (Ziel $t)" }
-    Get-SkipReason $p 'dbx' 0 $true $HasKek2023
+    $out
 }
 
 # ================================================================ Vorpruefung
 Section "Vorpruefung"
-$cs = Get-CimInstance Win32_ComputerSystem
-$bios = Get-CimInstance Win32_BIOS
-Info ("{0} {1}, BIOS {2}" -f $cs.Manufacturer, $cs.Model, $bios.SMBIOSBIOSVersion)
-Info ("Skript-Version {0}, Geraet {1}" -f $ScriptVersion, $deviceId)
-Info ("Notfall-Weg ({0}): Taste {1} -> Secure Boot AUS (sicher)  bzw.  {2}" -f $vi.Vendor, $vi.Key, $vi.Reset)
-Info  "  Schluessel-Reset nur, solange der Boot-Manager noch 2011-signiert ist - sonst danach kein Start mit Secure Boot."
+$sys = Show-SystemInfo
+Info ("Notfall ({0}, Taste {1}): Secure Boot AUS. Schluessel-Reset nur, solange der Boot-Manager noch 2011-signiert ist." -f $vi.Vendor, $vi.Key)
 try { $sbOn = Confirm-SecureBootUEFI -ErrorAction Stop } catch { $sbOn = $null }
-if ($null -eq $sbOn) { Bad "Kein UEFI - Abbruch."; Finish }
-if ($sbOn) { Ok "Secure Boot aktiv" } else { Warn "Secure Boot ist AUS (Schreiben geht trotzdem, sofern nicht Setup Mode)" }
-try { if ((Get-SecureBootUEFI -Name SetupMode).Bytes[0] -eq 1) { Bad "Firmware im Setup Mode - erst Schluessel im BIOS auf Werkseinstellung setzen. Abbruch."; Finish } } catch {}
-
-if (-not $DbxStepwise -and -not (Test-Path $PayloadDir)) {
-    Bad "Ordner $PayloadDir nicht gefunden."
-    Info "Entweder alle Windows-Updates installieren (der Ordner kommt mit den Secure-Boot-Updates),"
-    Info "oder die signierten .bin-Dateien von Microsoft (GitHub: microsoft/secureboot_objects)"
-    Info "in einen Ordner legen und mit -PayloadDir <Ordner> angeben."
+if ($null -eq $sbOn) { Bad "Kein UEFI, Abbruch."; Finish }
+if ($sbOn) { Ok "Secure Boot aktiv" } else { Warn "Secure Boot ist aus (Schreiben geht trotzdem)" }
+$setup = $null; try { $setup = (Get-SecureBootUEFI -Name SetupMode).Bytes[0] } catch {}
+if ($setup -eq 1) {
+    Bad "Setup Mode: erst im Firmware-Setup die Werksschluessel laden (HP: Key Ownership 'HP Keys'). Abbruch."
     Finish
 }
-Info "Update-Dateien aus: $PayloadDir"
+if (-not (Test-Path $PayloadDir)) { Warn "Ordner $PayloadDir fehlt: erst alle Windows-Updates installieren." }
 
-# ================================================================ Backup
-Section "Sicherung der aktuellen Schluessel"
-$backupDir = Join-Path (Get-SubDir $localDir 'Backups') ("Backup_{0}" -f $stamp)
+# ================================================================ Sicherung
+Section "Sicherung"
+$script:backupDir = Join-Path (Get-SubDir $localDir 'Backups') ("Backup_{0}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-foreach ($n in 'PK','KEK','db','dbx') {
-    try {
-        $v = Get-SecureBootUEFI -Name $n -ErrorAction Stop
-        [IO.File]::WriteAllBytes((Join-Path $backupDir "$n.bin"), $v.Bytes)
-        Ok ("{0,-4} gesichert ({1} Bytes)" -f $n, $v.Bytes.Length)
-    } catch { Warn "$n konnte nicht gesichert werden: $_" }
-}
-Info "Ordner: $backupDir"
-
-# ================================================================ DBX SCHRITTWEISE (8_)
-if ($DbxStepwise) {
-    Section "dbx Datei fuer Datei"
-    Info "Die Firmware bekommt jede Sperrliste einzeln, die aelteste zuerst (bei gleichem Datum die kleinste)."
-    Info "Geprueft werden zwei Vermutungen:"
-    Info "  Groesse:     die Firmware nimmt nur Dateien bis zu einer bestimmten Groesse an"
-    Info "  Zeitstempel: die Firmware nimmt nur Dateien an, die neuer signiert sind als der Stand in der dbx"
-    Info "Aelteste zuerst sorgt dafuer, dass eine angenommene Datei die naechste nicht wegen des Datums blockiert."
-    if (-not (Test-Path $StepDir)) {
-        New-Item -ItemType Directory -Path $StepDir -Force -ErrorAction SilentlyContinue | Out-Null
-        Warn "Ordner $StepDir war leer bzw. fehlte und wurde angelegt."
-    }
-    Info "Zusaetzliche Dateien gehoeren nach: $StepDir"
-    Info "  Quelle: github.com/microsoft/secureboot_objects, Ordner PostSignedObjects/SignedByKEK2011/dbx_x64_Legacy"
-    Info "  und PostSignedObjects/DBX/amd64 (beide mit dem KEK 2011 signiert). Unterordner sind erlaubt."
-    Info "  Neuere Windows-Versionen bringen die dbx nur noch mit dem KEK 2023 signiert mit (dbxupdate.bin)."
-    Info "  Ohne KEK 2023 helfen deshalb nur die KEK-2011-Fassungen."
-
-    $dbxNow = (Get-SecureBootUEFI -Name dbx -ErrorAction SilentlyContinue).Bytes
-    $haveH  = Get-EslHashes $dbxNow
-    $kekNow = Get-VarEsl 'KEK'
-    $hasKek23 = [bool]($kekNow.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' })
-    Info ("KEK 2023 eingetragen: {0} (Dateien, die nur mit dem KEK 2023 signiert sind, nimmt die Firmware sonst nicht an)" -f $(if ($hasKek23) { 'ja' } else { 'nein' }))
-    Info ("dbx jetzt: {0} Hashes, {1} Bytes" -f $haveH.Count, $(if ($dbxNow) { $dbxNow.Length } else { 0 }))
-
-    $items = @(); $seenC = @{}
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    foreach ($src in @($StepDir, $PayloadDir)) {
-        if (-not (Test-Path $src)) { continue }
-        $full = (Resolve-Path $src).Path.TrimEnd('\')
-        foreach ($f in @(Get-ChildItem $full -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.bin','.efiauth2','.auth2' })) {
-            $rel = $f.FullName.Substring($full.Length).TrimStart('\')
-            $p = Read-AuthPayload $f.FullName
-            if (-not $p) { if ($src -eq $StepDir) { Info ("{0}: kein signiertes Variablen-Update, uebersprungen" -f $rel) }; continue }
-            if ((Get-PayloadTarget $p) -ne 'dbx') { continue }
-            $key = [BitConverter]::ToString($sha.ComputeHash($p.Content))
-            if ($seenC.ContainsKey($key)) { continue }
-            $seenC[$key] = $true
-            $hs = Get-EslHashes $p.Content
-            $new = @($hs | Where-Object { -not $haveH.Contains($_) }).Count
-            $items += [pscustomobject]@{ Rel = $rel; P = $p; Hashes = $hs; New = $new; Size = $p.Content.Length; Why = (Get-StepSkipReason $p $rel $hasKek23) }
-        }
-    }
-    if ($items.Count -eq 0) {
-        Bad "Keine dbx-Dateien gefunden."
-        Info "Dateien wie oben beschrieben nach $StepDir legen und erneut starten."
-        Finish
-    }
-
-    Write-Host ""
-    Info ("{0,-44} {1,-10} {2,-4} {3,7} {4,6} {5,6}  {6}" -f 'Datei', 'signiert', 'KEK', 'Bytes', 'Hashes', 'neu', 'Entscheidung')
-    foreach ($it in ($items | Sort-Object { $_.P.Time }, Size)) {
-        $dec = if ($it.Why) { "nein: $($it.Why)" } elseif ($it.New -eq 0) { 'nein: alles schon enthalten' } else { 'ja' }
-        Info ("{0,-44} {1,-10} {2,-4} {3,7} {4,6} {5,6}  {6}" -f $(if ($it.Rel.Length -gt 44) { '...' + $it.Rel.Substring($it.Rel.Length - 41) } else { $it.Rel }), $it.P.Time.Substring(0, 10), $it.P.SignedBy, $it.Size, $it.Hashes.Count, $it.New, $dec)
-    }
-    $todo = @($items | Where-Object { -not $_.Why -and $_.New -gt 0 } | Sort-Object { $_.P.Time }, Size)
-    if ($todo.Count -eq 0) { Write-Host ""; Ok "Nichts zu tun: die dbx enthaelt bereits alle Hashes der verwendbaren Dateien."; Finish }
-
-    if (-not $Execute) {
-        Write-Host ""
-        Warn ("TROCKENLAUF - nichts geschrieben. {0} Dateien wuerden der Reihe nach probiert." -f $todo.Count)
-        Finish
-    }
-
-    Write-Host ""
-    Warn ("Wenn der PC danach nicht startet: Firmware-Setup ({0}, Taste {1}) -> Secure Boot AUSSCHALTEN." -f $vi.Vendor, $vi.Key)
-    Info "Hash-Sperren betreffen nur bekannte unsichere Bootloader; der aktuelle Windows-Boot-Manager ist nicht darunter."
-    if ((Read-Host ("{0} Dateien nacheinander in die dbx schreiben? Zum Bestaetigen JA tippen" -f $todo.Count)) -cne 'JA') { Info "Abgebrochen."; Finish }
-    try {
-        $blv = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
-        if ($blv.ProtectionStatus -eq 'On') { Suspend-BitLocker -MountPoint $env:SystemDrive -RebootCount 3 -ErrorAction Stop | Out-Null; Ok "BitLocker fuer 3 Neustarts angehalten" }
-    } catch {}
-
-    $tmp = Join-Path $env:TEMP "sbstep_$stamp"
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-    $results = @()
-    foreach ($it in $todo) {
-        $new = @($it.Hashes | Where-Object { -not $haveH.Contains($_) }).Count
-        if ($new -eq 0) { Info ("{0}: inzwischen alles enthalten, uebersprungen" -f $it.Rel); continue }
-        $cFile = Join-Path $tmp 'content.bin'; $sFile = Join-Path $tmp 'sig.p7'
-        [IO.File]::WriteAllBytes($cFile, $it.P.Content); [IO.File]::WriteAllBytes($sFile, $it.P.Sig)
-        $before = $haveH.Count
-        try {
-            Set-SecureBootUEFI -Name dbx -Time $it.P.Time -ContentFilePath $cFile -SignedFilePath $sFile -AppendWrite -ErrorAction Stop | Out-Null
-            $dbxNow = (Get-SecureBootUEFI -Name dbx).Bytes
-            $haveH  = Get-EslHashes $dbxNow
-            Ok ("{0} ({1} Bytes): angenommen, dbx {2} -> {3} Hashes, {4} Bytes" -f $it.Rel, $it.Size, $before, $haveH.Count, $dbxNow.Length)
-            $results += [pscustomobject]@{ Rel = $it.Rel; Size = $it.Size; Time = $it.P.Time; Ok = $true; Msg = '' }
-        } catch {
-            $code = '0x{0:X8}' -f $_.Exception.HResult
-            Bad ("{0} ({1} Bytes): abgelehnt, {2} {3}" -f $it.Rel, $it.Size, $code, $_.Exception.Message)
-            $results += [pscustomobject]@{ Rel = $it.Rel; Size = $it.Size; Time = $it.P.Time; Ok = $false; Msg = $code }
-        }
-    }
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-
-    Section "Ergebnis dbx schrittweise"
-    $okR = @($results | Where-Object { $_.Ok }); $badR = @($results | Where-Object { -not $_.Ok })
-    Info ("{0} angenommen, {1} abgelehnt, dbx jetzt {2} Hashes" -f $okR.Count, $badR.Count, $haveH.Count)
-    if ($results.Count) {
-        Write-Host ""
-        Info ("{0,-44} {1,-10} {2,7}  {3}" -f 'Versuch', 'signiert', 'Bytes', 'Ergebnis')
-        foreach ($r in $results) { Info ("{0,-44} {1,-10} {2,7}  {3}" -f $(if ($r.Rel.Length -gt 44) { '...' + $r.Rel.Substring($r.Rel.Length - 41) } else { $r.Rel }), $r.Time.Substring(0, 10), $r.Size, $(if ($r.Ok) { 'angenommen' } else { "abgelehnt $($r.Msg)" })) }
-        Write-Host ""
-    }
-    if ($results.Count -and $okR.Count -eq 0) {
-        $minSize = ($results | Measure-Object Size -Minimum).Minimum
-        $newest  = ($results | Sort-Object Time | Select-Object -Last 1).Time.Substring(0, 10)
-        Warn ("Alles abgelehnt, auch die kleinste Datei ({0} Bytes) und die neueste (signiert {1})." -f $minSize, $newest)
-        Info "Groesse:     unwahrscheinlich, schon die kleinste Datei ging nicht."
-        Info "Zeitstempel: nur moeglich, wenn die vorhandene dbx neuer markiert ist als alle Dateien"
-        Info "             (z.B. vom Hersteller so vorbelegt). Neuere KEK-2011-Dateien gibt es nicht mehr."
-        Info "Ergebnis: Diese Firmware nimmt das Anhaengen an die dbx von Windows aus nicht an."
-    } elseif ($okR.Count -and $badR.Count) {
-        $maxOk  = ($okR  | Measure-Object Size -Maximum).Maximum
-        $minBad = ($badR | Measure-Object Size -Minimum).Minimum
-        $sizeFits = $minBad -gt $maxOk
-        $oldestOk = ($okR  | Sort-Object Time | Select-Object -First 1).Time
-        $newestBad = ($badR | Sort-Object Time | Select-Object -Last 1).Time
-        $timeFits = $newestBad -lt $oldestOk
-        if ($sizeFits) { Warn ("Groesse:     passt. Angenommen bis {0} Bytes, abgelehnt ab {1} Bytes." -f $maxOk, $minBad) }
-        else           { Info ("Groesse:     passt nicht. Eine abgelehnte Datei ({0} Bytes) war kleiner als eine angenommene ({1} Bytes)." -f $minBad, $maxOk) }
-        if ($timeFits) { Warn ("Zeitstempel: passt. Abgelehnt bis Signaturdatum {0}, angenommen ab {1}." -f $newestBad.Substring(0, 10), $oldestOk.Substring(0, 10)) }
-        else           { Info  "Zeitstempel: passt nicht. Aeltere und neuere Dateien wurden gemischt angenommen und abgelehnt." }
-        if ($sizeFits -and $timeFits) { Info "Beide Erklaerungen passen zu diesem Ergebnis. Mehr Dateien mit anderer Groesse oder anderem Datum wuerden es klaeren." }
-        elseif (-not $sizeFits -and -not $timeFits) { Info "Kein klares Muster. Bitte das Protokoll aufheben, die Fehlercodes oben helfen bei der Suche." }
-        Info "Mehr als die angenommenen Dateien geht auf diesem Geraet vermutlich nicht."
-    }
-    if ($okR.Count) {
-        Write-Host ""
-        Warn "Jetzt NEU STARTEN und pruefen, ob der PC normal bootet, danach 1_Pruefen.cmd."
-    }
-    Finish
+foreach ($n in 'PK', 'KEK', 'db', 'dbx') {
+    $b = Get-VarBytes $n
+    if ($b) { [IO.File]::WriteAllBytes((Join-Path $backupDir "$n.bin"), $b); Ok ("{0,-4} gesichert ({1} Bytes)" -f $n, $b.Length) } else { Warn "$n nicht lesbar" }
 }
 
-$db  = Get-VarEsl 'db'
-$kek = Get-VarEsl 'KEK'
-$dbx = Get-VarEsl 'dbx'
-$have = @{}
-foreach ($c in @($db.Certs) + @($kek.Certs)) { if ($c) { $have[$c.Thumbprint] = $true } }
+# ================================================================ Plan
+$db = Get-Esl 'db'; $kek = Get-Esl 'KEK'
+$have = @{}; foreach ($c in @($db.Certs) + @($kek.Certs)) { if ($c) { $have[$c.Thumbprint] = $true } }
 $hasKek23 = [bool]($kek.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' })
-
-# ================================================================ Dateien analysieren
-Section "Gefundene, von Microsoft signierte Update-Dateien"
-$plan = @()
-$planned = @{}
-foreach ($f in Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction SilentlyContinue) {
-    $p = Read-AuthPayload $f.FullName
-    if (-not $p) { Info ("{0}: kein signiertes Variablen-Update, uebersprungen" -f $f.Name); continue }
-
-    $target = Get-PayloadTarget $p
-
-    $what = if ($p.Certs.Count) { ($p.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', ' } else { "$($p.Hashes) Hashes" }
-    $missing = @($p.Certs | Where-Object { -not $have.ContainsKey($_.Thumbprint) })
-    $signer = if ($p.Signers.Count) { $p.Signers -join ', ' } else { '(unbekannt)' }
-
-    Write-Host ""
-    Info ("Datei:      {0}" -f $p.Name)
-    Info ("Inhalt:     {0}" -f $what)
-    Info ("Ziel:       {0}" -f $target)
-    Info ("Signiert:   {0}  ({1}), Kette: KEK {2}" -f $signer, $p.Time, $p.SignedBy)
-
-    $certKey = (@($p.Certs | ForEach-Object { $_.Thumbprint }) | Sort-Object) -join ','
-
-    $skip = Get-SkipReason $p $target $missing.Count ([bool]$IncludeDbx) $hasKek23
-    if (-not $skip -and $target -ne 'dbx' -and $planned.ContainsKey($certKey)) {
-        $planned[$certKey].Payloads += $p
-        Info "-> Ersatzdatei (wird probiert, falls die erste abgelehnt wird)"
-        continue
-    }
-
-    if ($target -eq 'KEK' -and -not $skip) {
-        $pkSubj = @()
-        try { $pkSubj = @((Parse-Esl (Get-SecureBootUEFI -Name PK).Bytes).Certs | ForEach-Object { Get-CN $_.Subject }) } catch {}
-        Info ("PK dieses PCs: {0}" -f ($pkSubj -join ', '))
-        Warn "KEK-Update klappt nur, wenn die Datei mit genau diesem PK signiert ist."
-    }
-
-    if ($skip) { Info "-> uebersprungen: $skip" }
-    else {
-        Ok "-> wird eingespielt"
-        $order = switch ($target) { 'db' { if ($what -match 'Windows UEFI CA 2023') { 1 } else { 2 } } 'KEK' { 3 } 'dbx' { 4 } }
-        $item = [pscustomobject]@{ Order = $order; Target = $target; What = $what; Payloads = @($p) }
-        $plan += $item
-        if ($target -ne 'dbx') { $planned[$certKey] = $item }
-    }
-}
-$plan = @($plan | Sort-Object Order)
-# Praxis: DBUpdate1P2023.bin ist mit dem KEK 2023 signiert und wird ohne diesen abgelehnt -> 1P-Dateien zuletzt probieren
-foreach ($s in $plan) { $s.Payloads = @($s.Payloads | Sort-Object { if ($_.Name -match '1P') { 1 } else { 0 } }) }
-
-if ($plan.Count -eq 0) {
-    Section "Ergebnis"
-    Ok "Nichts zu tun - alle gefundenen Zertifikate sind bereits eingetragen (oder keine passenden Dateien)."
-    Finish
-}
+$haveH = Get-EslHashes (Get-VarBytes 'dbx')
 
 Section "Plan"
-$i = 0; foreach ($s in $plan) { $i++; Info ("{0}. {1,-4} <- {2}  [{3}]" -f $i, $s.Target, $s.What, (($s.Payloads | ForEach-Object { $_.Name }) -join ' / ')) }
+Info ("KEK 2023 eingetragen: {0}   dbx: {1} verschiedene Hashes" -f $(if ($hasKek23) { 'ja' } else { 'nein' }), $haveH.Count)
+Write-Host ""
 
-if (-not $Execute) {
-    Write-Host ""
-    Warn "TROCKENLAUF - nichts geschrieben. Zum Ausfuehren mit -Execute starten (4_Manuell_einspielen.cmd)."
-    Finish
+# db und KEK: gleiche Zertifikate aus mehreren Dateien = Ersatzdateien
+$plan = @(); $planned = @{}
+foreach ($f in @(Get-ChildItem -Path $PayloadDir -Filter *.bin -File -ErrorAction SilentlyContinue)) {
+    $p = Read-AuthPayload $f.FullName
+    if (-not $p) { continue }
+    $target = Get-PayloadTarget $p
+    if ($target -eq 'dbx') { continue }
+    $what = if ($p.Certs.Count) { ($p.Certs | ForEach-Object { Get-CN $_.Subject }) -join ', ' } else { "$($p.Hashes) Hashes" }
+    $missing = @($p.Certs | Where-Object { -not $have.ContainsKey($_.Thumbprint) }).Count
+    $skip = Get-SkipReason $p $target $missing $hasKek23
+    if ($skip) { Info ("--   {0,-28} {1}" -f $p.Name, $skip); continue }
+    $certKey = (@($p.Certs | ForEach-Object { $_.Thumbprint }) | Sort-Object) -join ','
+    if ($planned.ContainsKey($certKey)) { $planned[$certKey].Payloads += $p; continue }
+    $order = if ($target -eq 'KEK') { 3 } elseif ($what -match 'Windows UEFI CA 2023') { 1 } else { 2 }
+    $item = [pscustomobject]@{ Order = $order; Target = $target; What = $what; Payloads = @($p) }
+    $plan += $item; $planned[$certKey] = $item
 }
+# Mit dem KEK 2011 signierte Ersatzdateien zuerst probieren
+foreach ($s in $plan) { $s.Payloads = @($s.Payloads | Sort-Object { if ($_.SignedBy -eq '2011') { 0 } else { 1 } }) }
+$plan = @($plan | Sort-Object Order)
 
-# ================================================================ Ausfuehren
-Section "WARNUNG"
-Bad "Microsoft hat das automatische Update fuer dieses Geraet evtl. wegen eines Firmwarefehlers gesperrt."
-Bad ("Wenn der PC danach nicht startet: Firmware-Setup ({0}, Taste {1}) -> Secure Boot AUSSCHALTEN." -f $vi.Vendor, $vi.Key)
-Bad ("  Schluessel-Reset ({0}) NUR, solange der Boot-Manager noch 2011-signiert ist." -f $vi.Reset)
-if ($vi.Extra) { Bad ("  {0}" -f $vi.Extra) }
-Info "Sicherung liegt in: $backupDir"
+# dbx
+$dbxItems = @(Get-DbxCandidates $haveH $hasKek23)
+$usable = @($dbxItems | Where-Object { -not $_.Why -and $_.New -gt 0 })
+$blocked23 = @($dbxItems | Where-Object { $_.Why -match 'KEK 2023' -and $_.New -gt 0 })
+$have2011 = @($dbxItems | Where-Object { $_.P.SignedBy -eq '2011' -and $_.P.File -like "$Kek2011Dir*" })
+if ($usable.Count -eq 0 -and $blocked23.Count -gt 0 -and $have2011.Count -eq 0) {
+    Warn ("Windows liefert die Sperrliste nur mit dem KEK 2023 signiert ({0} neue Hashes), der hier fehlt." -f ($blocked23 | Measure-Object New -Maximum).Maximum)
+    Info "Microsoft stellt dieselben Hashes mit KEK-2011-Signatur bereit (github.com/microsoft/secureboot_objects)."
+    if ($Execute -and (Confirm-JA "Die drei Dateien jetzt nach $Kek2011Dir herunterladen?")) {
+        if ((Get-Kek2011Files) -gt 0) { $dbxItems = @(Get-DbxCandidates $haveH $hasKek23); $usable = @($dbxItems | Where-Object { -not $_.Why -and $_.New -gt 0 }) }
+    } else { Info "Ohne Download: Dateien von Hand nach $Kek2011Dir legen." }
+    Write-Host ""
+}
+foreach ($it in $dbxItems) {
+    $why = if ($it.Why) { $it.Why } elseif ($it.New -eq 0) { 'alle Hashes schon enthalten' } else { $null }
+    if ($why) { Info ("--   {0,-28} {1}" -f (Short $it.P.Name 28), $why) }
+}
+if ($usable.Count) { $plan += [pscustomobject]@{ Order = 4; Target = 'dbx'; What = ("bis zu {0} neue Hashes" -f ($usable | Measure-Object New -Maximum).Maximum); Payloads = @($usable | Sort-Object New -Descending | ForEach-Object { $_.P }) } }
 
-try {
-    $blv = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
-    if ($blv.ProtectionStatus -eq 'On') {
-        Suspend-BitLocker -MountPoint $env:SystemDrive -RebootCount 3 -ErrorAction Stop | Out-Null
-        Ok "BitLocker fuer 3 Neustarts angehalten"
-    }
-} catch {}
+if ($plan.Count -eq 0) { Write-Host ""; Ok "Nichts zu tun: alle passenden Zertifikate und Hashes sind schon eingetragen."; Finish }
+Write-Host ""
+foreach ($s in $plan) { Ok ("{0,-4} <- {1}   [{2}]" -f $s.Target, $s.What, (($s.Payloads | ForEach-Object { Short $_.Name 32 }) -join ' / ')) }
+if ($plan | Where-Object { $_.Target -eq 'KEK' }) { Info "KEK: klappt nur, wenn die Datei mit dem PK dieses Geraets signiert ist. Eine Ablehnung ist harmlos." }
 
-$tmp = Join-Path $env:TEMP "sbmanual_$stamp"
+if (-not $Execute) { Write-Host ""; Warn "Nur Plan, nichts geschrieben. Zum Schreiben 3_Zertifikate_einspielen.cmd starten."; Finish }
+
+# ================================================================ Schreiben
+Write-Host ""
+Warn ("Startet der PC danach nicht: Firmware-Setup ({0}, Taste {1}), Secure Boot AUS, dann 5_Sicherung_zurueckspielen.cmd." -f $vi.Vendor, $vi.Key)
+if (-not (Confirm-JA "Plan jetzt ausfuehren?")) { Info "Abgebrochen."; Finish }
+Suspend-BitLockerOnce
+$tmp = Join-Path $env:TEMP ("sbmanual_{0}" -f (Get-Date -Format 'yyyyMMddHHmmss'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 $okCount = 0
-
 foreach ($s in $plan) {
-    Write-Host ""
-    $answer = Read-Host ("'{0}' in {1} eintragen? Zum Bestaetigen JA tippen" -f $s.What, $s.Target)
-    if ($answer -cne 'JA') { Info "uebersprungen"; continue }
-
-    $n = 0
     foreach ($pl in $s.Payloads) {
-        $n++
-        if ($n -gt 1) { Info ("Probiere Ersatzdatei {0} ..." -f $pl.Name) }
-        $cFile = Join-Path $tmp ($pl.Name + '.content')
-        $sFile = Join-Path $tmp ($pl.Name + '.p7')
-        [IO.File]::WriteAllBytes($cFile, $pl.Content)
-        [IO.File]::WriteAllBytes($sFile, $pl.Sig)
-
-        $before = (Get-SecureBootUEFI -Name $s.Target).Bytes.Length
+        if ($s.Target -eq 'dbx') {
+            $hsP = Get-EslHashes $pl.Content
+            $new = @($hsP | Where-Object { -not $haveH.Contains($_) }).Count
+            if ($new -eq 0) { Info ("{0}: inzwischen alles enthalten" -f $pl.Name); continue }
+        }
+        $cFile = Join-Path $tmp 'content.bin'; $sFile = Join-Path $tmp 'sig.p7'
+        [IO.File]::WriteAllBytes($cFile, $pl.Content); [IO.File]::WriteAllBytes($sFile, $pl.Sig)
+        $before = (Get-VarBytes $s.Target).Length
         try {
             Set-SecureBootUEFI -Name $s.Target -Time $pl.Time -ContentFilePath $cFile -SignedFilePath $sFile -AppendWrite -ErrorAction Stop | Out-Null
-            $after = (Get-SecureBootUEFI -Name $s.Target).Bytes.Length
-            if ($after -gt $before -or $s.Target -eq 'dbx') {
-                Ok ("{0} geschrieben aus {1} ({2} -> {3} Bytes)" -f $s.Target, $pl.Name, $before, $after); $okCount++; break
+            $after = (Get-VarBytes $s.Target).Length
+            if ($s.Target -eq 'dbx') {
+                $n0 = $haveH.Count; $haveH = Get-EslHashes (Get-VarBytes 'dbx')
+                Ok ("dbx  {0}: angenommen, {1} -> {2} Hashes" -f $pl.Name, $n0, $haveH.Count); $okCount++
+                continue
             }
-            Warn ("{0}: Befehl ohne Fehler, aber {1} unveraendert ({2} Bytes)" -f $pl.Name, $s.Target, $after)
+            if ($after -gt $before) { Ok ("{0,-4} {1}: geschrieben ({2} -> {3} Bytes)" -f $s.Target, $pl.Name, $before, $after); $okCount++; break }
+            Warn ("{0,-4} {1}: ohne Fehler, aber unveraendert" -f $s.Target, $pl.Name)
         } catch {
-            Bad ("{0}: Firmware hat abgelehnt: {1}" -f $pl.Name, $_.Exception.Message)
-            if ($s.Target -eq 'dbx') { Info "(dbx: manche Firmwares lehnen Anhaengen ab, wenn die vorhandene dbx einen neueren Zeitstempel hat - z.B. vom Hersteller vorbelegt. Naechster Versuch: 8_dbx_schrittweise.cmd, kleinere Dateien einzeln.)" }
-            if ($s.Target -eq 'KEK') { Info "(erwartet, wenn die KEK-Datei nicht mit dem PK dieses Geraets signiert ist)" }
+            Bad ("{0,-4} {1}: abgelehnt (0x{2:X8})" -f $s.Target, $pl.Name, $_.Exception.HResult)
         }
     }
 }
@@ -623,18 +200,15 @@ Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 # ================================================================ Kontrolle
 Section "Kontrolle"
-$db  = Get-VarEsl 'db'; $kek = Get-VarEsl 'KEK'
-foreach ($n in 'Windows UEFI CA 2023','Microsoft UEFI CA 2023','Option ROM UEFI CA 2023') {
+$db = Get-Esl 'db'; $kek = Get-Esl 'KEK'; $dbxNow = Get-Esl 'dbx'
+foreach ($n in 'Windows UEFI CA 2023', 'Microsoft UEFI CA 2023', 'Option ROM UEFI CA 2023') {
     if ($db.Certs | Where-Object { $_.Subject -match $n }) { Ok "db:  $n" } else { Bad "db:  $n fehlt" }
 }
-if ($kek.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' }) { Ok "KEK: Microsoft Corporation KEK 2K CA 2023" } else { Bad "KEK: KEK 2K CA 2023 fehlt" }
-
+if ($kek.Certs | Where-Object { $_.Subject -match 'KEK 2K CA 2023' }) { Ok "KEK: Microsoft Corporation KEK 2K CA 2023" } else { Warn "KEK: KEK 2K CA 2023 fehlt (nur mit Hersteller-Datei oder 4_Experte_Schluessel_neu_aufbauen.cmd)" }
+Info ("dbx: {0} verschiedene Hashes" -f $dbxNow.Unique)
 if ($okCount -gt 0) {
     Write-Host ""
-    Warn "Jetzt NEU STARTEN und pruefen, ob der PC normal bootet."
-    Info ("Notfall: Firmware-Setup ({0}, Taste {1}) -> Secure Boot AUSSCHALTEN, booten, Protokoll pruefen." -f $vi.Vendor, $vi.Key)
-    Info "Danach SecureBootCheck.ps1 (1_Pruefen.cmd) laufen lassen."
-    Info "Ist 'Windows UEFI CA 2023' in der db, kann Windows den neuen Boot-Manager installieren"
-    Info "(2_Update_anstossen.cmd) - sofern die Microsoft-Sperre das nicht ebenfalls blockiert."
+    Warn "Jetzt NEU STARTEN, dann 1_Pruefen.cmd."
+    Info "Ist die Windows UEFI CA 2023 in der db, installiert 2_Update_anstossen.cmd den neuen Boot-Manager."
 }
 Finish
