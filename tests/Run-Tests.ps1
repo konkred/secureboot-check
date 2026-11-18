@@ -309,6 +309,14 @@ $okR = [ordered]@{ CPU = (New-Rating 'Ok' 'x'); RAM = (New-Rating 'Ok' 'x') }
 Check "Zusammenfassung alles gruen -> Ok" ((Lv (Get-Summary $okR)) -eq 'Ok')
 $okR['RAM'] = New-Rating 'Warn' 'x'
 Check "Zusammenfassung gelb -> Warn"      ((Lv (Get-Summary $okR)) -eq 'Warn')
+Check "Nur RAM knapp: offiziell moeglich"  ((Get-Summary $okR).Text -match '^Windows 11 ist offiziell moeglich\. Knapp.*RAM')
+$okR['TPM'] = Get-TpmRating '1.2' $true
+Check "TPM 1.2: nicht offiziell, RAM knapp" ((Get-Summary $okR).Text -match 'nicht offiziell unterstuetzt: TPM\. Knapp.*RAM')
+$okR['TPM'] = Get-TpmRating '2.0' $false
+Check "TPM aus: nur zu erledigen"         ((Get-Summary $okR).Text -match '^Windows 11 ist offiziell moeglich\. Knapp.*RAM, TPM')
+$okR['TPM'] = Get-TpmRating '2.0' $true
+$okR['CPU'] = Get-CpuRating 'Intel(R) Core(TM) i5-3470' $true $true
+Check "Alte CPU: nicht offiziell"         ((Get-Summary $okR).Text -match 'nicht offiziell unterstuetzt: CPU')
 $okR['CPU'] = Get-CpuRating 'Intel Core2 Duo E8400' $false $true
 Check "Zusammenfassung alte CPU -> Bad"   ((Get-Summary $okR).Text -match 'Prozessor')
 

@@ -145,7 +145,12 @@ function Get-Summary($Ratings) {
     $warn = @($Ratings.Keys | Where-Object { $Ratings[$_].Level -eq 'Warn' })
     if ($bad -contains 'CPU' -and $Ratings['CPU'].Text -match 'SSE4|64-Bit') { return New-Rating 'Bad' 'Windows 11 (ab 24H2) laeuft auf diesem PC nicht: der Prozessor ist zu alt.' }
     if ($bad.Count)  { return New-Rating 'Bad' ("Windows 11 so nicht moeglich. Erst beheben: {0}" -f ($bad -join ', ')) }
-    if ($warn.Count) { return New-Rating 'Warn' ("Windows 11 laeuft, aber nicht alles ist offiziell oder optimal: {0}" -f ($warn -join ', ')) }
+    # Gelb heisst entweder "nicht offiziell" (Prozessor, TPM 1.2) oder nur "knapp bzw. noch zu erledigen"
+    $unoff = @($warn | Where-Object { $_ -eq 'CPU' -or ($_ -eq 'TPM' -and $Ratings[$_].Text -match 'nicht offiziell') })
+    $tight = @($warn | Where-Object { $unoff -notcontains $_ })
+    $more  = if ($tight.Count) { ". Knapp oder noch zu erledigen: {0}" -f ($tight -join ', ') } else { '' }
+    if ($unoff.Count) { return New-Rating 'Warn' ("Windows 11 laeuft, ist aber nicht offiziell unterstuetzt: {0}{1}" -f ($unoff -join ', '), $more) }
+    if ($tight.Count) { return New-Rating 'Warn' ("Windows 11 ist offiziell moeglich{0}" -f $more) }
     New-Rating 'Ok' 'Windows 11 ist offiziell moeglich.'
 }
 
@@ -254,7 +259,7 @@ foreach ($k in $ratings.Keys) { Show-Level $ratings[$k].Level ("{0,-12} {1}" -f 
 Write-Host ""
 $sum = Get-Summary $ratings
 Show-Level $sum.Level $sum.Text
-if ($sum.Level -eq 'Warn' -and ($ratings['CPU'].Level -eq 'Warn' -or $ratings['TPM'].Level -eq 'Warn') -and $tpmSpec) {
+if ($sum.Text -match 'nicht offiziell' -and $tpmSpec) {
     Info "Nicht unterstuetzter Prozessor oder TPM 1.2: Microsoft dokumentiert dafuer den Registry-Wert"
     Info "  HKLM\SYSTEM\Setup\MoSetup  AllowUpgradesWithUnsupportedTPMOrCPU = 1 (DWORD)."
     Info "Das Upgrade laeuft dann, Microsoft sagt aber keine Updates zu. Ohne TPM geht das nicht."
