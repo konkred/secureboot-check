@@ -18,7 +18,7 @@ Assert-Admin $PSCommandPath $PSBoundParameters
 $ErrorActionPreference = 'Continue'
 Initialize-Tool 'Win11Check'
 
-function R([string]$Level, [string]$Text) { [pscustomobject]@{ Level = $Level; Text = $Text } }
+function New-Rating([string]$Level, [string]$Text) { [pscustomobject]@{ Level = $Level; Text = $Text } }
 
 # ================================================================ Bewertungen (ohne Systemzugriff, testbar)
 function Test-CpuOfficial([string]$Name) {
@@ -69,28 +69,28 @@ function Test-CpuOfficial([string]$Name) {
 }
 
 function Get-CpuRating([string]$Name, [bool]$Sse42, [bool]$Is64, [int]$Cores = 2, [int]$Mhz = 2000) {
-    if (-not $Is64)  { return R 'Bad' 'kein 64-Bit-Prozessor, Windows 11 gibt es nur mit 64 Bit' }
-    if (-not $Sse42) { return R 'Bad' 'ohne SSE4.2/POPCNT: Windows 11 ab 24H2 startet nicht mehr, aeltere Versionen bekommen keine Updates' }
-    if ($Cores -lt 2 -or $Mhz -lt 1000) { return R 'Bad' ("zu schwach ({0} Kern(e), {1} MHz), Windows 11 braucht 2 Kerne und 1 GHz" -f $Cores, $Mhz) }
+    if (-not $Is64)  { return New-Rating 'Bad' 'kein 64-Bit-Prozessor, Windows 11 gibt es nur mit 64 Bit' }
+    if (-not $Sse42) { return New-Rating 'Bad' 'ohne SSE4.2/POPCNT: Windows 11 ab 24H2 startet nicht mehr, aeltere Versionen bekommen keine Updates' }
+    if ($Cores -lt 2 -or $Mhz -lt 1000) { return New-Rating 'Bad' ("zu schwach ({0} Kern(e), {1} MHz), Windows 11 braucht 2 Kerne und 1 GHz" -f $Cores, $Mhz) }
     $off = Test-CpuOfficial $Name
-    if ($off -eq $true)  { return R 'Ok' 'offiziell unterstuetzt' }
-    if ($off -eq $false) { return R 'Warn' 'laeuft, ist aber nicht offiziell unterstuetzt' }
-    R 'Warn' 'nicht in der eingebauten Liste, bitte bei Microsoft pruefen ("Windows 11 supported processors")'
+    if ($off -eq $true)  { return New-Rating 'Ok' 'offiziell unterstuetzt' }
+    if ($off -eq $false) { return New-Rating 'Warn' 'laeuft, ist aber nicht offiziell unterstuetzt' }
+    New-Rating 'Warn' 'nicht in der eingebauten Liste, bitte bei Microsoft pruefen ("Windows 11 supported processors")'
 }
 
 function Get-RamRating([double]$Gb) {
-    if ($Gb -lt 3.5) { return R 'Bad' ("{0:N0} GB, Windows 11 braucht mindestens 4 GB" -f $Gb) }
-    if ($Gb -le 8.5) { return R 'Warn' ("{0:N0} GB, reicht, mehr als 8 GB waeren angenehmer" -f $Gb) }
-    R 'Ok' ("{0:N0} GB" -f $Gb)
+    if ($Gb -lt 3.5) { return New-Rating 'Bad' ("{0:N0} GB, Windows 11 braucht mindestens 4 GB" -f $Gb) }
+    if ($Gb -le 8.5) { return New-Rating 'Warn' ("{0:N0} GB, reicht, mehr als 8 GB waeren angenehmer" -f $Gb) }
+    New-Rating 'Ok' ("{0:N0} GB" -f $Gb)
 }
 
 function Get-DiskRating([double]$Gb, [string]$Media) {
     $t = "{0:N0} GB, {1}" -f $Gb, $(if ($Media) { $Media } else { 'Typ unbekannt' })
-    if ($Gb -lt 64)        { return R 'Bad' "$t, Windows 11 braucht mindestens 64 GB" }
-    if ($Media -eq 'HDD')  { return R 'Warn' "$t, eine SSD waere deutlich schneller" }
-    if ($Gb -lt 128)       { return R 'Warn' "$t, knapp fuer Updates (128 GB empfohlen)" }
-    if ($Media -ne 'SSD')  { return R 'Warn' "$t, SSD oder HDD nicht erkennbar" }
-    R 'Ok' $t
+    if ($Gb -lt 64)        { return New-Rating 'Bad' "$t, Windows 11 braucht mindestens 64 GB" }
+    if ($Media -eq 'HDD')  { return New-Rating 'Warn' "$t, eine SSD waere deutlich schneller" }
+    if ($Gb -lt 128)       { return New-Rating 'Warn' "$t, knapp fuer Updates (128 GB empfohlen)" }
+    if ($Media -ne 'SSD')  { return New-Rating 'Warn' "$t, SSD oder HDD nicht erkennbar" }
+    New-Rating 'Ok' $t
 }
 
 function Get-WddmFromDriverVersion([string]$Version) {
@@ -111,42 +111,42 @@ function Get-MaxFeatureLevel([string]$List) {
 }
 
 function Get-GpuRating([string]$Name, $Wddm, $FeatureLevel) {
-    if ($Name -match 'Basic Display|Basic Render|Standard-VGA|Standard VGA') { return R 'Warn' 'kein Grafiktreiber installiert, erst den Treiber des Herstellers installieren' }
-    if ($null -eq $Wddm -and $null -eq $FeatureLevel) { return R 'Warn' 'Treibermodell nicht erkennbar' }
+    if ($Name -match 'Basic Display|Basic Render|Standard-VGA|Standard VGA') { return New-Rating 'Warn' 'kein Grafiktreiber installiert, erst den Treiber des Herstellers installieren' }
+    if ($null -eq $Wddm -and $null -eq $FeatureLevel) { return New-Rating 'Warn' 'Treibermodell nicht erkennbar' }
     $inv = [Globalization.CultureInfo]::InvariantCulture
     $fl = if ($null -ne $FeatureLevel) { ', DirectX Feature Level ' + ([double]$FeatureLevel).ToString('0.0', $inv).Replace('.', '_') } else { '' }
     $wd = if ($null -ne $Wddm) { 'WDDM ' + ([double]$Wddm).ToString('0.0', $inv) } else { 'WDDM ?' }
-    if ($null -ne $Wddm -and $Wddm -lt 2.0) { return R 'Bad' "$wd$fl, Windows 11 braucht WDDM 2.0 und DirectX 12" }
-    if ($null -ne $FeatureLevel -and $FeatureLevel -lt 11.0) { return R 'Bad' "$wd$fl, zu alt fuer DirectX 12" }
-    if ($null -eq $Wddm) { return R 'Warn' "$wd$fl" }
-    R 'Ok' "$wd$fl"
+    if ($null -ne $Wddm -and $Wddm -lt 2.0) { return New-Rating 'Bad' "$wd$fl, Windows 11 braucht WDDM 2.0 und DirectX 12" }
+    if ($null -ne $FeatureLevel -and $FeatureLevel -lt 11.0) { return New-Rating 'Bad' "$wd$fl, zu alt fuer DirectX 12" }
+    if ($null -eq $Wddm) { return New-Rating 'Warn' "$wd$fl" }
+    New-Rating 'Ok' "$wd$fl"
 }
 
 function Get-TpmRating([string]$Spec, $Enabled) {
-    if (-not $Spec) { return R 'Bad' 'kein TPM gefunden. Im BIOS nach "PTT" (Intel) bzw. "fTPM" (AMD) oder "TPM" suchen und einschalten' }
+    if (-not $Spec) { return New-Rating 'Bad' 'kein TPM gefunden. Im BIOS nach "PTT" (Intel) bzw. "fTPM" (AMD) oder "TPM" suchen und einschalten' }
     $major = if ($Spec -match '^\s*(\d+)\.(\d+)') { [double]("{0}.{1}" -f $Matches[1], $Matches[2]) } else { 0 }
     if ($major -ge 2.0) {
-        if ($Enabled -eq $false) { return R 'Warn' "TPM $Spec vorhanden, aber deaktiviert: im BIOS einschalten" }
-        return R 'Ok' "TPM $Spec"
+        if ($Enabled -eq $false) { return New-Rating 'Warn' "TPM $Spec vorhanden, aber deaktiviert: im BIOS einschalten" }
+        return New-Rating 'Ok' "TPM $Spec"
     }
-    R 'Warn' "TPM $Spec, nicht offiziell. Manche PCs (z.B. HP, Dell, Lenovo) lassen sich per Firmware-Update auf TPM 2.0 umstellen"
+    New-Rating 'Warn' "TPM $Spec, nicht offiziell. Manche PCs (z.B. HP, Dell, Lenovo) lassen sich per Firmware-Update auf TPM 2.0 umstellen"
 }
 
 function Get-SbRating($Uefi, $On, [bool]$Kek23, [bool]$Win23) {
-    if ($Uefi -ne $true) { return R 'Bad' 'Legacy-Start ohne UEFI. Windows 11 braucht UEFI: Datentraeger mit MBR2GPT umstellen, im BIOS auf UEFI und Secure Boot an' }
-    if ($On -ne $true)   { return R 'Bad' 'Secure Boot ist aus: im Firmware-Setup einschalten' }
-    if ($Kek23 -and $Win23) { return R 'Ok' 'an, Zertifikate 2023 vorhanden' }
-    R 'Warn' 'an, aber noch mit den Zertifikaten von 2011 (laufen 2026 ab): 1_Pruefen.cmd, dann 2_Update_anstossen.cmd bzw. 3_Zertifikate_einspielen.cmd'
+    if ($Uefi -ne $true) { return New-Rating 'Bad' 'Legacy-Start ohne UEFI. Windows 11 braucht UEFI: Datentraeger mit MBR2GPT umstellen, im BIOS auf UEFI und Secure Boot an' }
+    if ($On -ne $true)   { return New-Rating 'Bad' 'Secure Boot ist aus: im Firmware-Setup einschalten' }
+    if ($Kek23 -and $Win23) { return New-Rating 'Ok' 'an, Zertifikate 2023 vorhanden' }
+    New-Rating 'Warn' 'an, aber noch mit den Zertifikaten von 2011 (laufen 2026 ab): 1_Pruefen.cmd, dann 2_Update_anstossen.cmd bzw. 3_Zertifikate_einspielen.cmd'
 }
 
 function Get-Summary($Ratings) {
     # $Ratings: geordnete Hashtable Bereich -> Bewertung
     $bad  = @($Ratings.Keys | Where-Object { $Ratings[$_].Level -eq 'Bad' })
     $warn = @($Ratings.Keys | Where-Object { $Ratings[$_].Level -eq 'Warn' })
-    if ($bad -contains 'CPU' -and $Ratings['CPU'].Text -match 'SSE4|64-Bit') { return R 'Bad' 'Windows 11 (ab 24H2) laeuft auf diesem PC nicht: der Prozessor ist zu alt.' }
-    if ($bad.Count)  { return R 'Bad' ("Windows 11 so nicht moeglich. Erst beheben: {0}" -f ($bad -join ', ')) }
-    if ($warn.Count) { return R 'Warn' ("Windows 11 laeuft, aber nicht alles ist offiziell oder optimal: {0}" -f ($warn -join ', ')) }
-    R 'Ok' 'Windows 11 ist offiziell moeglich.'
+    if ($bad -contains 'CPU' -and $Ratings['CPU'].Text -match 'SSE4|64-Bit') { return New-Rating 'Bad' 'Windows 11 (ab 24H2) laeuft auf diesem PC nicht: der Prozessor ist zu alt.' }
+    if ($bad.Count)  { return New-Rating 'Bad' ("Windows 11 so nicht moeglich. Erst beheben: {0}" -f ($bad -join ', ')) }
+    if ($warn.Count) { return New-Rating 'Warn' ("Windows 11 laeuft, aber nicht alles ist offiziell oder optimal: {0}" -f ($warn -join ', ')) }
+    New-Rating 'Ok' 'Windows 11 ist offiziell moeglich.'
 }
 
 # ================================================================ Daten sammeln
@@ -227,7 +227,7 @@ foreach ($g in $gpus) {
     $rank = @{ Ok = 3; Warn = 2; Bad = 1 }[$r.Level]
     if (-not $best -or $rank -gt $best.Rank) { $best = [pscustomobject]@{ Rank = $rank; R = $r; Name = $g.Name } }
 }
-$ratings['Grafik'] = if ($best) { $best.R } else { R 'Warn' 'keine Grafikkarte gefunden' }
+$ratings['Grafik'] = if ($best) { $best.R } else { New-Rating 'Warn' 'keine Grafikkarte gefunden' }
 $gpuName = if ($best) { $best.Name } else { '' }
 
 Section "TPM"

@@ -131,6 +131,12 @@ foreach ($f in @(Get-ChildItem $root -Filter *.cmd -File)) {
 foreach ($f in @(Get-ChildItem $root -Filter *.ps1 -File | Where-Object { $_.Name -ne 'SecureBootCommon.ps1' })) {
     Check "$($f.Name): laedt SecureBootCommon.ps1" ([IO.File]::ReadAllText($f.FullName) -match "SecureBootCommon\.ps1")
 }
+foreach ($f in @(Get-ChildItem $root -Filter *.ps1 -File) + @(Get-Item $PSCommandPath)) {
+    $tok = $null; $err = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tok, [ref]$err)
+    $clash = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name } | Where-Object { Get-Alias -Name $_ -ErrorAction SilentlyContinue } | Select-Object -Unique)
+    Check "$($f.Name): keine Funktion heisst wie ein Alias" ($clash.Count -eq 0) (($clash -join ', ') + ' (Alias gewinnt, Funktion wird nie aufgerufen)')
+}
 $old = '3_Manuell|4_Manuell|5_Manuell|6_Schluessel|7_Sicherung|8_dbx|IncludeDbx|DbxStepwise|dbx_schrittweise'
 foreach ($f in @(Get-ChildItem $root -File | Where-Object { $_.Extension -in '.ps1', '.cmd', '.md', '.txt' })) {
     $hits = @(Select-String -Path $f.FullName -Pattern $old -AllMatches | ForEach-Object { $_.LineNumber })
@@ -225,7 +231,7 @@ Remove-Item Function:\Get-SecureBootUEFI
 
 # ------------------------------------------------------------------ 2c. Windows 11 (6_)
 Head "Win11Check.ps1: Bewertungen"
-foreach ($t in (Get-FunctionTexts (Join-Path $root 'Win11Check.ps1') @('R', 'Test-CpuOfficial', 'Get-CpuRating', 'Get-RamRating', 'Get-DiskRating', 'Get-WddmFromDriverVersion', 'Get-MaxFeatureLevel', 'Get-GpuRating', 'Get-TpmRating', 'Get-SbRating', 'Get-Summary'))) { . ([scriptblock]::Create($t)) }
+foreach ($t in (Get-FunctionTexts (Join-Path $root 'Win11Check.ps1') @('New-Rating', 'Test-CpuOfficial', 'Get-CpuRating', 'Get-RamRating', 'Get-DiskRating', 'Get-WddmFromDriverVersion', 'Get-MaxFeatureLevel', 'Get-GpuRating', 'Get-TpmRating', 'Get-SbRating', 'Get-Summary'))) { . ([scriptblock]::Create($t)) }
 function Lv($r) { $r.Level }
 $cpus = @(
     @('Intel(R) Core(TM)2 Duo CPU     E8400  @ 3.00GHz', $false, 'Bad'),
@@ -299,9 +305,9 @@ Check "Secure Boot Legacy -> Bad"    ((Lv (Get-SbRating $false $null $false $fal
 Check "Secure Boot aus -> Bad"       ((Lv (Get-SbRating $true $false $true $true)) -eq 'Bad')
 Check "Secure Boot 2011 -> Warn"     ((Lv (Get-SbRating $true $true $false $true)) -eq 'Warn')
 Check "Secure Boot 2023 -> Ok"       ((Lv (Get-SbRating $true $true $true $true)) -eq 'Ok')
-$okR = [ordered]@{ CPU = (R 'Ok' 'x'); RAM = (R 'Ok' 'x') }
+$okR = [ordered]@{ CPU = (New-Rating 'Ok' 'x'); RAM = (New-Rating 'Ok' 'x') }
 Check "Zusammenfassung alles gruen -> Ok" ((Lv (Get-Summary $okR)) -eq 'Ok')
-$okR['RAM'] = R 'Warn' 'x'
+$okR['RAM'] = New-Rating 'Warn' 'x'
 Check "Zusammenfassung gelb -> Warn"      ((Lv (Get-Summary $okR)) -eq 'Warn')
 $okR['CPU'] = Get-CpuRating 'Intel Core2 Duo E8400' $false $true
 Check "Zusammenfassung alte CPU -> Bad"   ((Get-Summary $okR).Text -match 'Prozessor')
