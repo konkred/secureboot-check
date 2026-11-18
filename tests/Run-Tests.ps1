@@ -303,7 +303,8 @@ Check "TPM 1.2 -> Warn"              ((Lv (Get-TpmRating '1.2' $true)) -eq 'Warn
 Check "kein TPM -> Bad"              ((Lv (Get-TpmRating '' $null)) -eq 'Bad')
 Check "Secure Boot Legacy -> Bad"    ((Lv (Get-SbRating $false $null $false $false)) -eq 'Bad')
 Check "Secure Boot aus -> Bad"       ((Lv (Get-SbRating $true $false $true $true)) -eq 'Bad')
-Check "Secure Boot 2011 -> Warn"     ((Lv (Get-SbRating $true $true $false $true)) -eq 'Warn')
+Check "Secure Boot 2011 -> Warn"     ((Lv (Get-SbRating $true $true $false $false)) -eq 'Warn')
+Check "Secure Boot nur KEK fehlt -> Warn, Text nennt KEK" ((Get-SbRating $true $true $false $true).Level -eq 'Warn' -and (Get-SbRating $true $true $false $true).Text -match 'nur der KEK 2023 fehlt')
 Check "Secure Boot 2023 -> Ok"       ((Lv (Get-SbRating $true $true $true $true)) -eq 'Ok')
 $okR = [ordered]@{ CPU = (New-Rating 'Ok' 'x'); RAM = (New-Rating 'Ok' 'x') }
 Check "Zusammenfassung alles gruen -> Ok" ((Lv (Get-Summary $okR)) -eq 'Ok')

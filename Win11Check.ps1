@@ -136,6 +136,7 @@ function Get-SbRating($Uefi, $On, [bool]$Kek23, [bool]$Win23) {
     if ($Uefi -ne $true) { return New-Rating 'Bad' 'Legacy-Start ohne UEFI. Windows 11 braucht UEFI: Datentraeger mit MBR2GPT umstellen, im BIOS auf UEFI und Secure Boot an' }
     if ($On -ne $true)   { return New-Rating 'Bad' 'Secure Boot ist aus: im Firmware-Setup einschalten' }
     if ($Kek23 -and $Win23) { return New-Rating 'Ok' 'an, Zertifikate 2023 vorhanden' }
+    if ($Win23) { return New-Rating 'Warn' 'an, Windows UEFI CA 2023 vorhanden, nur der KEK 2023 fehlt (siehe 1_Pruefen.cmd)' }
     New-Rating 'Warn' 'an, aber noch mit den Zertifikaten von 2011 (laufen 2026 ab): 1_Pruefen.cmd, dann 2_Update_anstossen.cmd bzw. 3_Zertifikate_einspielen.cmd'
 }
 

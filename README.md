@@ -217,15 +217,16 @@ Diese Ordner sind per `.gitignore` vom Repository ausgeschlossen.
 
 ## Getestete Geräte
 
-Stand 18.11.2026.
+Stand 18.11.2026, Skriptversion 2.0 für Dell und HP Compaq Pro 6300.
 
-| Gerät | Ergebnis |
-|---|---|
-| HP ProDesk 400 G5, HP EliteBook 840 G3 | alles auf 2023, KEK über `4_` |
-| Lenovo ThinkCentre M93 und M93p | alles auf 2023, KEK und dbx über `4_` |
-| Chromebox Google Teemo (MrChromebox) | alles auf 2023 nur mit `2_`; die Firmware kennt die 2023-Zertifikate ab Werk |
-| HP Compaq Pro 6300 | db, Boot-Manager und dbx auf 2023, der KEK fehlt. `4_` geht hier nicht (siehe oben). Die Sperrliste von Windows ist nur mit dem KEK 2023 signiert; `3_` nimmt deshalb die KEK-2011-Fassung. |
-| 10ZiG Thin Client | kein Secure Boot, nicht betroffen |
+| Gerät | Secure Boot | Windows 11 (`6_`) |
+|---|---|---|
+| Dell OptiPlex 3060 Micro (i5-8500T) | alles auf 2023 nur mit `2_`: Windows hatte KEK 2023 und db schon selbst eingetragen, `2_` tauschte den Boot-Manager | offiziell möglich, nur der RAM ist mit 8 GB knapp |
+| HP ProDesk 400 G5, HP EliteBook 840 G3 | alles auf 2023, KEK über `4_` | |
+| Lenovo ThinkCentre M93 und M93p | alles auf 2023, KEK und dbx über `4_` | |
+| Chromebox Google Teemo (MrChromebox) | alles auf 2023 nur mit `2_`; die Firmware kennt die 2023-Zertifikate ab Werk | |
+| HP Compaq Pro 6300 MT (i5-3470) | db, Boot-Manager und dbx auf 2023, der KEK fehlt (Microsoft-Sperre 1802). `4_` geht hier nicht (siehe oben). Die Sperrliste von Windows ist nur mit dem KEK 2023 signiert; `3_` nimmt deshalb die KEK-2011-Fassung. | läuft, aber nicht offiziell: Prozessor der 3. Generation und TPM 1.2 |
+| 10ZiG Thin Client | kein Secure Boot, nicht betroffen | |
 
 ## Aufruf per PowerShell
 
